@@ -930,8 +930,6 @@ def build_converse_kwargs(
     messages: List[Dict],
     tools: Optional[List[Dict]] = None,
     max_tokens: int = 4096,
-    temperature: Optional[float] = None,
-    top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
 ) -> Dict[str, Any]:
@@ -952,14 +950,10 @@ def build_converse_kwargs(
     if system_prompt:
         kwargs["system"] = system_prompt
 
-    from agent.anthropic_adapter import _forbids_sampling_params
-
-    if not _forbids_sampling_params(model):
-        if temperature is not None:
-            kwargs["inferenceConfig"]["temperature"] = temperature
-
-        if top_p is not None:
-            kwargs["inferenceConfig"]["topP"] = top_p
+    # ★ Sampling params are never sent — see agent/transports/chat_completions.py
+    #   build_kwargs for why. The temperature/topP writes lived behind a
+    #   "unless this model forbids them" check; now nothing writes them at all,
+    #   so a value re-appearing upstream can no longer leak onto the wire.
 
     if stop_sequences:
         kwargs["inferenceConfig"]["stopSequences"] = stop_sequences
@@ -992,8 +986,6 @@ def call_converse(
     messages: List[Dict],
     tools: Optional[List[Dict]] = None,
     max_tokens: int = 4096,
-    temperature: Optional[float] = None,
-    top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
 ) -> SimpleNamespace:
@@ -1007,8 +999,6 @@ def call_converse(
         messages=messages,
         tools=tools,
         max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p,
         stop_sequences=stop_sequences,
         guardrail_config=guardrail_config,
     )
@@ -1033,8 +1023,6 @@ def call_converse_stream(
     messages: List[Dict],
     tools: Optional[List[Dict]] = None,
     max_tokens: int = 4096,
-    temperature: Optional[float] = None,
-    top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
 ) -> SimpleNamespace:
@@ -1049,8 +1037,6 @@ def call_converse_stream(
         messages=messages,
         tools=tools,
         max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p,
         stop_sequences=stop_sequences,
         guardrail_config=guardrail_config,
     )

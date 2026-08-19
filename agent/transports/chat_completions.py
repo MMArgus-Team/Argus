@@ -263,8 +263,6 @@ class ChatCompletionsTransport(ProviderTransport):
             qwen_prepare_inplace_fn: callable | None — in-place variant for deepcopied lists
             qwen_session_metadata: dict | None
             # Temperature
-            fixed_temperature: Any — from _fixed_temperature_for_model()
-            omit_temperature: bool
             # Reasoning
             supports_reasoning: bool
             github_reasoning_extra: dict | None
@@ -470,8 +468,6 @@ class ChatCompletionsTransport(ProviderTransport):
         This method replaces the entire flag-based kwargs assembly when a
         provider_profile is passed. Every quirk comes from the profile object.
         """
-        from providers.base import OMIT_TEMPERATURE
-
         # Message preprocessing
         sanitized = profile.prepare_messages(sanitized)
 
@@ -491,16 +487,22 @@ class ChatCompletionsTransport(ProviderTransport):
             "messages": sanitized,
         }
 
-        # Temperature
-        if profile.fixed_temperature is OMIT_TEMPERATURE:
-            pass  # Don't include temperature at all
-        elif profile.fixed_temperature is not None:
-            api_kwargs["temperature"] = profile.fixed_temperature
-        else:
-            # Use caller's temperature if provided
-            temp = params.get("temperature")
-            if temp is not None:
-                api_kwargs["temperature"] = temp
+        # ★ Sampling params are never sent. temperature / top_p / top_k are
+        #   dropped here rather than negotiated per provider.
+        #
+        #   They were a permanent source of hard 400s: every gateway pins a
+        #   different subset, and the same endpoint accepts a value for one
+        #   model then rejects it for the next ("invalid temperature: only 1 is
+        #   allowed for this model", "Unsupported value: 'temperature' does not
+        #   support 0.2 with this model"). That grew four overlapping
+        #   workarounds — a per-model fixed/omit table, a client wrapper that
+        #   stripped the keys, an adapter-level strip, and a reactive
+        #   drop-and-retry — and STILL left gaps: the voice path reached none of
+        #   them and 400'd on every single call.
+        #
+        #   Provider defaults are the contract now. Anthropic extended thinking
+        #   is unaffected: it sets temperature=1 inside anthropic_adapter,
+        #   downstream of this builder, because that API mandates the value.
 
         # Timeout
         timeout = params.get("timeout")

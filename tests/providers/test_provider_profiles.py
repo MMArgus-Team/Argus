@@ -1,7 +1,7 @@
 """Tests for the provider module registry and profiles."""
 
 from providers import get_provider_profile, _REGISTRY
-from providers.base import ProviderProfile, OMIT_TEMPERATURE
+from providers.base import ProviderProfile
 
 
 class TestRegistry:
@@ -33,10 +33,6 @@ class TestNvidiaProfile:
         p = get_provider_profile("nvidia")
         assert p.default_max_tokens == 16384
 
-    def test_no_special_temperature(self):
-        p = get_provider_profile("nvidia")
-        assert p.fixed_temperature is None
-
     def test_base_url(self):
         p = get_provider_profile("nvidia")
         assert "nvidia.com" in p.base_url
@@ -47,10 +43,6 @@ class TestNvidiaProfile:
 
 
 class TestKimiProfile:
-    def test_temperature_omit(self):
-        p = get_provider_profile("kimi")
-        assert p.fixed_temperature is OMIT_TEMPERATURE
-
     def test_max_tokens(self):
         p = get_provider_profile("kimi")
         assert p.default_max_tokens == 32000

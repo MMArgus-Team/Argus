@@ -2430,8 +2430,6 @@ export const zh: Translations = {
       micLabel: '语音（流式识别）',
       ttsOnTitle: '语音播报：开（自动朗读分析）— 点击关闭',
       ttsOffTitle: '语音播报：关 — 点击开启',
-      dialogOnTitle: '对话模式：开（语音自然交互，智能分诊+秒回+可打断）— 点击关闭',
-      dialogOffTitle: '对话模式：关 — 点击进入语音对话交互（自动开麦）',
       dialogToastMicBlocked: '对话模式下麦克风已由对话接管，请先关闭对话模式再单独控制',
       dialogToastTtsBlocked: '对话模式下语音播报已自动生效，请先关闭对话模式再单独控制',
       finalizingRecognition: '正在完成识别…',

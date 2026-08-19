@@ -42,7 +42,6 @@ class BedrockTransport(ProviderTransport):
 
         params:
             max_tokens: int — output token limit (default 4096)
-            temperature: float | None
             guardrail_config: dict | None — Bedrock guardrails
             region: str — AWS region (default 'us-east-1')
         """
@@ -56,7 +55,6 @@ class BedrockTransport(ProviderTransport):
             messages=messages,
             tools=tools,
             max_tokens=params.get("max_tokens", 4096),
-            temperature=params.get("temperature"),
             guardrail_config=guardrail,
         )
         # Sentinel keys for dispatch — agent pops these before the boto3 call

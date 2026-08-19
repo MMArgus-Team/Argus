@@ -364,6 +364,31 @@ def get_load_error() -> str:
 # kernel — call ensure_ready_async() to have readiness orchestrate the load.
 
 
+def _log_local_prompt(call: str, messages: list, templated: str) -> None:
+    """Dump the on-device prompt verbatim, same format as the remote path.
+
+    ``templated`` is what the model literally consumes — the chat template has
+    already wrapped the messages in its role markers, so it can differ from a
+    naive system+user concatenation. Both are recorded: ``system``/``user`` for
+    reading, ``templated_chars`` so a template that mangled something is
+    visible as a length mismatch. Tagged ``loc="local"`` so a local decision is
+    never mistaken for a remote one in the same file.
+    """
+    try:
+        from agent.multimodal.voice_trace import vtrace_prompt
+        system = "\n".join(
+            str(m.get("content") or "") for m in messages
+            if m.get("role") == "system")
+        user = "\n".join(
+            str(m.get("content") or "") for m in messages
+            if m.get("role") == "user")
+        vtrace_prompt(f"{call}.prompt", model="local", system=system,
+                      user=user, loc="local",
+                      templated_chars=len(templated or ""))
+    except Exception:
+        pass
+
+
 def decide_route_local(text: str, hint: str = "") -> Optional[Tuple[str, str]]:
     """本地 Qwen2.5-0.5B 分诊: 判 self (自己答) / main_agent (委派主 Agent).
 
@@ -449,6 +474,7 @@ def _infer_route(text: str, hint: str) -> Optional[Tuple[str, str]]:
     ]
     prompt = tok.apply_chat_template(messages, tokenize=False,
                                      add_generation_prompt=True)
+    _log_local_prompt("decide_route", messages, prompt)
     inputs = tok(prompt, return_tensors="pt").to(device)
     with torch.no_grad():
         out = model.generate(
@@ -541,6 +567,7 @@ def _infer_intent_eou(text: str, hint: str) -> Optional[dict]:
     ]
     prompt = tok.apply_chat_template(messages, tokenize=False,
                                      add_generation_prompt=True)
+    _log_local_prompt("intent_eou", messages, prompt)
     inputs = tok(prompt, return_tensors="pt").to(device)
     with torch.no_grad():
         out = model.generate(
@@ -553,20 +580,20 @@ def _infer_intent_eou(text: str, hint: str) -> Optional[dict]:
     text_out = tok.decode(new_tokens, skip_special_tokens=True).strip()
     if not text_out:
         _va_llm_log("intent_eou", loc="local", ok=False, ms=_ms(),
-                    payload_in={"text": text, "hint": hint}, out=None, err="empty")
+                    payload_in={"text": text, "hint": hint, "user_msg": user}, out=None, err="empty")
         return None
     obj = _parse_json_relaxed(text_out)
     if not obj or not isinstance(obj, dict) \
             or "speak_to_me" not in obj or "is_end" not in obj:
         log.debug("[voice_intent_local.eou] JSON parse/field fail: %r", text_out[:80])
         _va_llm_log("intent_eou", loc="local", ok=False, ms=_ms(),
-                    payload_in={"text": text, "hint": hint},
+                    payload_in={"text": text, "hint": hint, "user_msg": user},
                     out=text_out[:200], err="parse_fail")
         return None
     result = {"speak_to_me": bool(obj.get("speak_to_me")),
               "is_end": bool(obj.get("is_end"))}
     _va_llm_log("intent_eou", loc="local", ok=True, ms=_ms(),
-                payload_in={"text": text, "hint": hint}, out=result)
+                payload_in={"text": text, "hint": hint, "user_msg": user}, out=result)
     return result
 
 

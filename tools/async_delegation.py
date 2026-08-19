@@ -448,6 +448,29 @@ def dispatch_async_delegation_batch(
     return {"status": "dispatched", "delegation_id": delegation_id}
 
 
+def _batch_model_label(results: Any) -> "str | None":
+    """Summarise which model(s) a batch's children actually ran on.
+
+    Children normally inherit the parent's model, so every task reports the
+    same name and the batch header can state it plainly. A per-task model
+    override makes that untrue, so say "mixed" rather than crediting the whole
+    batch to whichever child happened to be first.
+    """
+    if not isinstance(results, list):
+        return None
+    names = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        name = r.get("model")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    if not names:
+        return None
+    unique = sorted(set(names))
+    return unique[0] if len(unique) == 1 else f"mixed ({', '.join(unique)})"
+
+
 def _finalize_batch(
     delegation_id: str, combined: Dict[str, Any], status: str
 ) -> None:
@@ -474,6 +497,7 @@ def _finalize_batch(
 
     dispatched_at = event_record.get("dispatched_at") or time.time()
     completed_at = event_record.get("completed_at") or time.time()
+    _results = combined.get("results") or []
     evt = {
         "type": "async_delegation",
         "delegation_id": delegation_id,
@@ -483,7 +507,13 @@ def _finalize_batch(
         "context": event_record.get("context"),
         "toolsets": event_record.get("toolsets"),
         "role": event_record.get("role"),
-        "model": event_record.get("model"),
+        # NOTE keep in sync with _push_completion_event's model resolution.
+        # ★ record["model"] is the *configured* delegation.model, which is None
+        #   whenever children inherit the parent's model (the common case) — so
+        #   reading only it printed "Model: ?". The model actually used is
+        #   reported by each child (delegate_tool entry["model"]). Prefer the
+        #   real one, like the single-task path at _push_completion_event.
+        "model": event_record.get("model") or _batch_model_label(_results),
         "status": status,
         "is_batch": True,
         # The full per-task results list — the formatter renders a

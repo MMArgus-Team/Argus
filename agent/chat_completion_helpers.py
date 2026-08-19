@@ -1318,17 +1318,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     _is_tokenhub = base_url_host_matches(agent._base_url_lower, "tokenhub.tencentmaas.com")
     _is_lmstudio = (agent.provider or "").strip().lower() == "lmstudio"
 
-    # Temperature: _fixed_temperature_for_model may return OMIT_TEMPERATURE
-    # sentinel (temperature omitted entirely), a numeric override, or None.
-    try:
-        from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
-        _ft = _fixed_temperature_for_model(agent.model, agent.base_url)
-        _omit_temp = _ft is OMIT_TEMPERATURE
-        _fixed_temp = _ft if not _omit_temp else None
-    except Exception:
-        _omit_temp = False
-        _fixed_temp = None
-
     # Provider preferences (OpenRouter-style)
     _prefs: Dict[str, Any] = {}
     if agent.providers_allowed:
@@ -1505,8 +1494,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         qwen_prepare_fn=agent._qwen_prepare_chat_messages if _is_qwen else None,
         qwen_prepare_inplace_fn=agent._qwen_prepare_chat_messages_inplace if _is_qwen else None,
         qwen_session_metadata=_qwen_meta,
-        fixed_temperature=_fixed_temp,
-        omit_temperature=_omit_temp,
         supports_reasoning=agent._supports_reasoning_extra_body(),
         github_reasoning_extra=agent._github_models_reasoning_extra_body() if _is_gh else None,
         lmstudio_reasoning_options=agent._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
@@ -2135,18 +2122,6 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
 
         summary_extra_body = {}
-        try:
-            from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE as _OMIT_TEMP
-        except Exception:
-            _fixed_temperature_for_model = None
-            _OMIT_TEMP = None
-        _raw_summary_temp = (
-            _fixed_temperature_for_model(agent.model, agent.base_url)
-            if _fixed_temperature_for_model is not None
-            else None
-        )
-        _omit_summary_temperature = _raw_summary_temp is _OMIT_TEMP
-        _summary_temperature = None if _omit_summary_temperature else _raw_summary_temp
         _is_nous = "nousresearch" in agent._base_url_lower
         # LM Studio uses top-level `reasoning_effort` (not extra_body.reasoning).
         # Mirror ChatCompletionsTransport.build_kwargs() so the summary path
@@ -2184,8 +2159,6 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 "model": agent.model,
                 "messages": api_messages,
             }
-            if _summary_temperature is not None:
-                summary_kwargs["temperature"] = _summary_temperature
             if agent.max_tokens is not None:
                 summary_kwargs.update(agent._max_tokens_param(agent.max_tokens))
             if _lm_reasoning_effort is not None:
@@ -2276,8 +2249,6 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                     "model": agent.model,
                     "messages": api_messages,
                 }
-                if _summary_temperature is not None:
-                    summary_kwargs["temperature"] = _summary_temperature
                 if agent.max_tokens is not None:
                     summary_kwargs.update(agent._max_tokens_param(agent.max_tokens))
                 if _lm_reasoning_effort is not None:
@@ -2867,10 +2838,64 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             and not reasoning_parts
             and not tool_calls_acc
         ):
-            raise RuntimeError(
-                "Provider returned an empty stream with no finish_reason "
-                "(possible upstream error or malformed SSE response)."
+            # Report WHAT was observed instead of guessing "malformed SSE".
+            # Two very different failures land here and the old message named
+            # only the rarer one:
+            #
+            #   * chunks > 0 — frames arrived but carried no content and no
+            #     terminator. That really is a malformed/truncated SSE body.
+            #   * chunks == 0 — the connection opened, delivered nothing at
+            #     all, then closed cleanly. On a reverse-proxied endpoint this
+            #     is almost always the proxy's own response deadline firing
+            #     while the model was still thinking: a reasoning model on a
+            #     heavy prompt can exceed a 60s nginx `proxy_read_timeout`
+            #     before emitting its first token (the same deadline noted in
+            #     agent/multimodal/_workers.py for this gateway). Calling that
+            #     "malformed SSE" sent debugging in the wrong direction for
+            #     hours, so say what it is and how to tell.
+            #
+            # NOTE this stays a retryable RuntimeError: a genuinely transient
+            # blip is common and a retry does fix it. A deadline cut, however,
+            # is deterministic — the retries burn the same wait again. The
+            # elapsed figure below is what makes that visible in the log.
+            _zc_chunks = 0
+            _zc_elapsed = None
+            try:
+                _zc_chunks = int(_diag.get("chunks", 0) or 0)
+                _zc_started = _diag.get("started_at")
+                if _zc_started:
+                    _zc_elapsed = time.time() - float(_zc_started)
+            except Exception:
+                pass
+            _zc_where = (
+                f" after {_zc_elapsed:.1f}s" if _zc_elapsed is not None else ""
             )
+            if _zc_chunks == 0:
+                _zc_detail = (
+                    f"Provider closed the stream{_zc_where} without sending a "
+                    "single chunk (no content, no finish_reason). The request "
+                    "was accepted, so this is usually an upstream gateway or "
+                    "reverse-proxy response deadline expiring while the model "
+                    "was still producing its first token — not a malformed "
+                    "response. If the elapsed time is suspiciously round (~60s) "
+                    "and identical on every retry, it is a proxy timeout: raise "
+                    "it server-side, or shorten time-to-first-token (smaller "
+                    "prompt, lower reasoning effort)."
+                )
+            else:
+                _zc_detail = (
+                    f"Provider returned an empty stream{_zc_where}: "
+                    f"{_zc_chunks} chunk(s) arrived but none carried content, "
+                    "tool calls, or a finish_reason (malformed or truncated "
+                    "SSE response)."
+                )
+            logger.warning(
+                "Empty stream from provider=%s model=%s: chunks=%d elapsed=%s",
+                getattr(agent, "provider", "?"), getattr(agent, "model", "?"),
+                _zc_chunks,
+                f"{_zc_elapsed:.1f}s" if _zc_elapsed is not None else "?",
+            )
+            raise RuntimeError(_zc_detail)
 
         # A stream that delivered a tool call but only partial/unparseable
         # JSON args splits into two very different cases:

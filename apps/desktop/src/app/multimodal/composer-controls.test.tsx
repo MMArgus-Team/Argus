@@ -12,8 +12,7 @@ const { actions, stores } = vi.hoisted(() => {
       finishMicTurn: vi.fn(async () => undefined),
       pushToast: vi.fn(),
       startMic: vi.fn(async () => undefined),
-      stopMic: vi.fn(async () => undefined),
-      toggleVoiceDialog: vi.fn(() => true)
+      stopMic: vi.fn(async () => undefined)
     },
     stores: {
       asrBuffer: atom<string[]>([]),
@@ -37,8 +36,7 @@ vi.mock('@/store/multimodal-voice', () => ({
   finishMicTurn: actions.finishMicTurn,
   startMic: actions.startMic,
   stopMic: actions.stopMic,
-  toggleMultimodalTts: vi.fn(),
-  toggleMultimodalVoiceDialog: actions.toggleVoiceDialog
+  toggleMultimodalTts: vi.fn()
 }))
 
 import { MultimodalAsrBar, MultimodalComposerControls } from './composer-controls'
@@ -54,8 +52,6 @@ describe('MultimodalAsrBar', () => {
     actions.pushToast.mockClear()
     actions.startMic.mockClear()
     actions.stopMic.mockClear()
-    actions.toggleVoiceDialog.mockReset()
-    actions.toggleVoiceDialog.mockReturnValue(true)
   })
 
   afterEach(cleanup)
@@ -111,18 +107,6 @@ describe('MultimodalAsrBar', () => {
     render(<MultimodalComposerControls />)
 
     expect(screen.getByLabelText('开始单次语音输入')).toBeTruthy()
-  })
-
-  it('keeps dialog mode off and explains when a manual turn owns the mic', () => {
-    stores.micState.set('recording')
-    actions.toggleVoiceDialog.mockReturnValue(false)
-    render(<MultimodalComposerControls />)
-
-    fireEvent.click(screen.getByTitle('对话模式：关 — 点击进入语音对话交互（自动开麦）'))
-
-    expect(actions.pushToast).toHaveBeenCalledWith({
-      level: 'error',
-      text: '请先结束当前单次录音，再开启语音对话'
-    })
+    expect(screen.queryByTitle('对话模式：关 — 点击进入语音对话交互（自动开麦）')).toBeNull()
   })
 })

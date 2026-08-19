@@ -222,7 +222,6 @@ class Config:
     #  + cruise_macro_summary_max_chars。)
 
     # 续写 (handle_ask 触发, search+recall findings 都到位后)
-    cont_temperature: float = 0.4
     cont_max_tokens: int = 1536
     cont_recent_frames: int = 12
     cont_now_frames: int = 2
@@ -235,7 +234,6 @@ class Config:
     query_worker_max_pending: int = 8
 
     # ---- ③ Router.answer() 一次性回答模式 (v3 架构: 不再用 _stream_continuation) ----
-    watcher_answer_temperature: float = 0.4
     watcher_answer_max_tokens: int = 1536
 
     # ---- ② MemoryWriter (5s wake-up, 跟 env_audio_window_sec 严格对齐) ----
@@ -245,7 +243,6 @@ class Config:
     # ★ 省 token 调优 (2026-07, 从 mm_memory_standalone 对齐): wake 5→10s、帧窗
     #   30→20. 权衡: 精度略降、LLM 调用频率再 -50%. 想回精度优先改回 5 / 30.
     writer_wake_interval: float = 10.0
-    writer_temperature: float = 0.2
     writer_max_tokens: int = 5000              # event_boundary + OCR/table/task 结构化输出
     writer_recent_frames: int = 20
     writer_image_max_side: int = 0             # L1 writer 请求前单独缩图; <=0 使用原始帧
@@ -304,7 +301,6 @@ class Config:
     writer_event_max_micros: int = 30                # 时间轴最多保留 N 个 micro
 
     # ---- ③ WatcherWorker ----
-    react_temperature: float = 0.2
     react_max_tokens: int = 512
     react_recent_frames: int = 8
     # ★ v5: 12→16, 跟原 router_answer 阶段的 cont_recent_history_turns 对齐
@@ -369,7 +365,6 @@ class Config:
     watch_report_every_rounds: int = 3
 
     # ---- ④ SearchWorker (外部检索) ----
-    search_temperature: float = 0.2
     search_max_tokens: int = 4096
     search_max_tool_rounds: int = 3
     # ★ Search 看的帧数: 30 → 1 (只看 anchor). 理由:
@@ -381,7 +376,6 @@ class Config:
     search_recent_frames: int = 1
 
     # ---- ⑤ RecallWorker (记忆查询) ----
-    recall_temperature: float = 0.2
     recall_max_tokens: int = 2048
     recall_max_rounds: int = 4
     # ★ 深度分析路径的召回 top_k (从 5 提到 12): 配合 OR 分词 + 相关性排序,
@@ -473,7 +467,6 @@ class Config:
     mem_l3_super_min_macro: int = 4                    # 攒满 4 个 macro 触发 L3 聚合
     mem_l3_super_max_duration: float = 900.0           # 或 15min 时长 cap 触发
     mem_entity_alias_threshold: float = 0.85           # entity canonicalize 模糊匹配阈值
-    mem_aggregator_temperature: float = 0.3
     mem_aggregator_max_tokens: int = 2048              # ★ evolve: 加大让 narrative_arc 装得下
     mem_aggregator_image_max_side: int = 512           # L2/L3 多图聚合专用缩略图, 防请求体超限
     mem_aggregator_image_jpeg_quality: int = 55
@@ -494,7 +487,6 @@ class Config:
     reviewer_recent_ratio: float = 0.6              # 128 帧里 60% 给最近, 40% 给全程
     reviewer_recent_window_sec: float = 300.0       # "最近" 窗长 (默认 5min)
     reviewer_min_micros: int = 3                    # 积满 N micro 才值得 review
-    reviewer_temperature: float = 0.2
     reviewer_max_tokens: int = 3072                 # 审校思考与 actions JSON 共享输出预算
     reviewer_max_consecutive_failures: int = 10     # 跟 Writer 同款兜底
     reviewer_max_actions_per_round: int = 8         # 单轮最多落 N 个 action, 防 LLM 暴走

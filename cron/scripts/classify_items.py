@@ -167,7 +167,6 @@ def main() -> int:
             task="monitor",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1024,
-            temperature=0,
         )
         content = resp.choices[0].message.content
         if not isinstance(content, str):

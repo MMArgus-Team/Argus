@@ -550,10 +550,10 @@ class MessagesChatCompletionsClient:
 # subsystem rather than parameterizing a worker.)
 _NUMERIC_KEYS = (
     # (删: front_* / cruise_macro_summary_max_chars — FrontWorker 已删的死配置)
-    "cont_temperature", "cont_max_tokens", "cont_recent_frames",
+    "cont_max_tokens", "cont_recent_frames",
     "cont_now_frames", "cont_recent_history_turns",
     "query_worker_max_concurrency", "query_worker_max_pending",
-    "writer_wake_interval", "writer_temperature", "writer_max_tokens",
+    "writer_wake_interval", "writer_max_tokens",
     "writer_recent_frames", "writer_image_max_side",
     "writer_image_jpeg_quality", "writer_asr_window_sec",
     # E9 (entity tier injection) + E10 (event timeline) — new in the latest engine
@@ -564,10 +564,10 @@ _NUMERIC_KEYS = (
     "writer_entity_tier1_visual_types", "writer_reused_id_enabled",
     "writer_event_timeline_enabled", "writer_event_max_macros",
     "writer_event_max_micros",
-    "react_temperature", "react_max_tokens", "react_recent_frames",
+    "react_max_tokens", "react_recent_frames",
     "react_recent_history_turns", "react_max_rounds",
     "react_search_tasks_max",
-    "react_round_max_tokens", "watcher_answer_temperature",
+    "react_round_max_tokens", 
     "watcher_answer_max_tokens",
     # ★ merge 修复: 这些 watcher pacing 兜底旋钮之前漏在 flatten 白名单外 →
     #   config.yaml 里改了不生效 (静默回落 dataclass 默认)。补上。
@@ -578,9 +578,9 @@ _NUMERIC_KEYS = (
     "watch_completion_confirm_max_attempts",
     "watch_completion_confirm_frames",
     "watch_completion_confirm_min_confidence",
-    "search_temperature", "search_max_tokens", "search_max_tool_rounds",
+    "search_max_tokens", "search_max_tool_rounds",
     "search_recent_frames",
-    "recall_temperature", "recall_max_tokens", "recall_max_rounds",
+    "recall_max_tokens", "recall_max_rounds",
     "recall_topk_micro", "recall_topk_entity", "recall_distill_max_tokens",
     "recall_decide_frames", "recall_verify_enabled", "recall_verify_max_frames",
     "recall_verify_retries", "recall_verify_retry_delay_sec",
@@ -590,13 +590,13 @@ _NUMERIC_KEYS = (
     "search_fact_value_max_chars", "facts_max",
     "mem_l2_macro_min_micro", "mem_l2_macro_max_duration",
     "mem_l3_super_min_macro", "mem_l3_super_max_duration",
-    "mem_entity_alias_threshold", "mem_aggregator_temperature",
+    "mem_entity_alias_threshold", 
     "mem_aggregator_max_tokens", "mem_aggregator_image_max_side",
     "mem_aggregator_image_jpeg_quality", "agg_l2_frames", "agg_l3_frames",
     "mem_micro_max_duration", "mem_micro_max_ticks",
     "reviewer_enabled", "reviewer_wake_interval", "reviewer_total_frames",
     "reviewer_recent_ratio", "reviewer_recent_window_sec", "reviewer_min_micros",
-    "reviewer_temperature", "reviewer_max_tokens",
+    "reviewer_max_tokens",
     "reviewer_max_actions_per_round", "reviewer_min_seg_dur_for_split",
     "reviewer_image_max_side", "reviewer_image_jpeg_quality",
     "reviewer_max_concurrency", "reviewer_single_endpoint_interval_sec",
@@ -715,6 +715,22 @@ _COERCE_FAILED = object()
 # Flat keys that legitimately appear in the flattened dict but are NOT Config
 # dataclass fields (consumed by build_config directly, or gate the subsystem).
 # The unknown-key guard must not warn about these.
+# ── Retired keys ────────────────────────────────────────────────────────────
+# Keys that WERE real Config fields and have since been removed on purpose.
+# They stay listed here so an existing config.yaml that still carries them
+# loads silently: the unknown-key guard below exists to catch typos ("your
+# edit was IGNORED"), and shouting that at someone whose file predates a
+# deliberate removal is just noise they can do nothing useful about.
+#
+# The *_temperature family went away when sampling params stopped being sent
+# at all — see agent/transports/chat_completions.py build_kwargs for why.
+_RETIRED_KEYS = frozenset({
+    "cont_temperature", "writer_temperature", "react_temperature",
+    "watcher_answer_temperature", "search_temperature", "recall_temperature",
+    "mem_aggregator_temperature", "reviewer_temperature",
+})
+
+
 _NON_CFG_PASSTHROUGH = frozenset({
     "enabled",            # subsystem gate (multimodal_enabled), not a Config field
     "worker_model",       # legacy alias → cfg.model pin (read in build_config)
@@ -929,7 +945,6 @@ _DEEP_PATH_EXACT = {
         "l2_frames": "agg_l2_frames",
         "l3_frames": "agg_l3_frames",
         "max_tokens": "mem_aggregator_max_tokens",
-        "temperature": "mem_aggregator_temperature",
         "image_max_side": "mem_aggregator_image_max_side",
         "image_jpeg_quality": "mem_aggregator_image_jpeg_quality",
     },
@@ -1175,6 +1190,7 @@ def flatten_mm_config(hermes_cfg: Dict[str, Any]) -> Dict[str, Any]:
             k for k in out
             if k not in _valid
             and k not in _NON_CFG_PASSTHROUGH
+            and k not in _RETIRED_KEYS
             # These prefixes are read RAW from the flattened dict (mm.get(...)) by
             # the gateway / monitor engine / VoiceAgent — NOT Config fields:
             #   voice_*    → VoiceAgent (self._cfg.get("settings"))
@@ -1478,11 +1494,6 @@ def kimi_fix_create_kwargs(kwargs: dict) -> dict:
     #   thinking:{type:disabled} with HTTP 400. For those we must never emit a
     #   disabled flag — omit the thinking key entirely (default = enabled).
     thinking_only = is_thinking_only_moonshot_model(model)
-    # Kimi: force temperature=1 (the only allowed value → else HTTP 400).
-    if "temperature" in kwargs and kwargs.get("temperature") != 1:
-        kwargs["temperature"] = 1
-    # Kimi doesn't take vLLM-style top_p/top_k tweaks on these light calls.
-    kwargs.pop("top_p", None)
     # Translate enable_thinking → thinking:{type}. Kimi ignores enable_thinking.
     eb = kwargs.get("extra_body")
     if isinstance(eb, dict):
@@ -1683,56 +1694,6 @@ def wrap_kimi_client(client: Any, *, dialect: str = "moonshot") -> Any:
     return client
 
 
-def wrap_luna_client(client: Any, *, model: str = "") -> Any:
-    """Wrap an OpenAI-compatible client so chat.completions.create() strips
-    sampling params that GPT-5.6 Luna's doc.devops endpoint rejects.
-
-    Luna server-side only accepts temperature=1 (its default); an explicit
-    temperature=0.2 returns HTTP 400 "Unsupported value: 'temperature' does not
-    support 0.2 with this model." The same 400 applies to top_p /
-    presence_penalty / frequency_penalty when a non-default value is pinned.
-    Strip these keys so the request falls back to Luna's server-side defaults.
-
-    Idempotent (marks completions._luna_wrapped); no-op unless model contains
-    "gpt-5.6 luna" (case-insensitive). Only use on OWNED clients.
-
-    Historical context: the equivalent shim _fixed_temperature_for_model in
-    agent/auxiliary_client.py catches Luna for the MAIN agent path. Submodule
-    clients built via build_submodule_client / _memory_client_from_config
-    bypass that path — the watcher's react_step / answer calls pin
-    temperature=0.2 / 0.4 from cfg. This wrap patches those paths.
-    """
-    if client is None:
-        return client
-    m = (model or "").strip().lower()
-    if "gpt-5.6 luna" not in m:
-        return client
-    try:
-        completions = client.chat.completions
-    except Exception:
-        return client
-    if getattr(completions, "_luna_wrapped", False):
-        return client
-    orig_create = completions.create
-
-    _STRIP_KEYS = ("temperature", "top_p",
-                   "presence_penalty", "frequency_penalty")
-
-    def wrapped_create(*args, **kwargs):
-        for k in _STRIP_KEYS:
-            kwargs.pop(k, None)
-        return orig_create(*args, **kwargs)
-
-    try:
-        completions.create = wrapped_create
-        completions._luna_wrapped = True
-        log.info("[multimodal] wrapped client for Luna: strip %s from chat.completions.create",
-                 list(_STRIP_KEYS))
-    except Exception:
-        log.warning("[multimodal] could not wrap client for Luna sampling params")
-    return client
-
-
 def _submodule_http_client(provider: str, model: str):
     """Build an httpx.AsyncClient whose request timeout follows the MAIN agent's
     config — resolved via ``get_provider_request_timeout``, which honors (in
@@ -1844,11 +1805,6 @@ def build_submodule_client(
     # while resident submodules can deterministically close a dedicated pool on
     # their owning event loop.
     client = wrap_kimi_client(client, dialect=dialect)
-    # ★ Luna doc.devops 只允许 temperature=1 等默认 sampling params;
-    #   watcher react_step / answer 从 cfg 显式发 temperature=0.2 / 0.4 会被
-    #   服务端 400 拒绝. wrap_luna_client 是一个 no-op for 非 Luna model,
-    #   Luna model 时 patch chat.completions.create 去掉不兼容 sampling params.
-    client = wrap_luna_client(client, model=model)
     client._hermes_submodule_owned = True  # type: ignore[attr-defined]
     return client, model
 
@@ -2196,8 +2152,6 @@ class HermesClientFactory(LLMClientFactory):
             mem_dialect = _detect_thinking_provider(
                 provider, base_url, mem_model)
             mem_oai = wrap_kimi_client(mem_oai, dialect=mem_dialect)
-            # ★ Luna sampling params 拦截 (跟 build_submodule_client 同款).
-            mem_oai = wrap_luna_client(mem_oai, model=mem_model)
             log.info("[multimodal] %s backend: %s endpoint=%s model=%s dialect=%s",
                      role_label, provider or "(oai)", base_url,
                      mem_model or "(main)", mem_dialect)

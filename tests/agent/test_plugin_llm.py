@@ -529,7 +529,9 @@ class TestPluginLlmFacade:
         assert captured["provider_override"] == "anthropic"
         assert captured["model_override"] == "claude-3-opus"
         assert captured["profile_override"] == "work"
-        assert captured["temperature"] == 0.0
+        # Sampling params are no longer forwarded — see
+        # agent/transports/chat_completions.py build_kwargs.
+        assert captured["temperature"] is None
         assert captured["max_tokens"] == 128
         assert captured["timeout"] == 10.0
 

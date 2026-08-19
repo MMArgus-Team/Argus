@@ -139,7 +139,6 @@ def run_oneshot(
         task=task,
         messages=messages,
         max_tokens=max_tokens,
-        temperature=temperature,
         timeout=timeout,
         main_runtime=main_runtime,
     )

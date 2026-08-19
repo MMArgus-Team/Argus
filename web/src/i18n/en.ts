@@ -913,8 +913,6 @@ export const en: Translations = {
       startSpeaking: "Click to start speaking (streaming voice)",
       ttsOnTitle: "Speech: on (auto-read agent/monitor/analysis bubbles) — click to disable",
       ttsOffTitle: "Speech: off — click to enable auto-read",
-      dialogOnTitle: "Dialog mode: on (natural voice interaction, smart triage + instant reply + interruptible) — click to disable",
-      dialogOffTitle: "Dialog mode: off — click to enter voice dialog interaction",
       playVoice: "Play voice",
       stopSpeaking: "Stop",
     },

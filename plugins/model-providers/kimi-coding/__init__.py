@@ -10,7 +10,7 @@ This module covers the chat_completions path (/v1 endpoint).
 from typing import Any
 
 from providers import register_provider
-from providers.base import OMIT_TEMPERATURE, ProviderProfile
+from providers.base import ProviderProfile
 
 
 def _is_thinking_only(model: str | None) -> bool:
@@ -82,7 +82,6 @@ kimi = KimiProfile(
     aliases=("kimi", "moonshot", "kimi-for-coding"),
     env_vars=("KIMI_API_KEY", "KIMI_CODING_API_KEY"),
     base_url="https://api.moonshot.ai/v1",
-    fixed_temperature=OMIT_TEMPERATURE,
     default_max_tokens=32000,
     default_headers={"User-Agent": "argus-agent/1.0"},
     default_aux_model="kimi-k2-turbo-preview",
@@ -93,7 +92,6 @@ kimi_cn = KimiProfile(
     aliases=("kimi-cn", "moonshot-cn"),
     env_vars=("KIMI_CN_API_KEY",),
     base_url="https://api.moonshot.cn/v1",
-    fixed_temperature=OMIT_TEMPERATURE,
     default_max_tokens=32000,
     default_headers={"User-Agent": "argus-agent/1.0"},
     default_aux_model="kimi-k2-turbo-preview",

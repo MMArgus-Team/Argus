@@ -386,7 +386,6 @@ def _monitor_completion_kwargs(model: str, *, messages: list) -> dict:
         # 2048: 文字密集画面下模型会把较长内容写进 reason, 200 会截断 JSON →
         # json.loads 失败 → 命中被误吞成"未触发"。给足空间让 JSON 写完整。
         "max_tokens": 2048,
-        "temperature": 0.2,
         "stream": False,
         "timeout": 30.0,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},

@@ -1898,8 +1898,6 @@ export interface Translations {
       micLabel: string
       ttsOnTitle: string
       ttsOffTitle: string
-      dialogOnTitle: string
-      dialogOffTitle: string
       dialogToastMicBlocked: string
       dialogToastTtsBlocked: string
       finalizingRecognition: string

@@ -16,7 +16,7 @@
  * Frames + questions share ONE session, so workers resolve the same buffer.
  */
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FC, type UIEvent } from "react";
-import { ArrowDown, Camera, ChevronDown, Database, Loader2, MessagesSquare, Mic, Monitor, NotebookPen, Play, Send, Square, Terminal, Volume2 } from "lucide-react";
+import { ArrowDown, Camera, ChevronDown, Database, Loader2, Mic, Monitor, NotebookPen, Play, Send, Square, Terminal, Volume2 } from "lucide-react";
 import { ChatModelPill } from "@/components/ChatModelPill";
 import { MonitorEvidenceStrip } from "@/components/MonitorEvidenceStrip";
 import { ChatSessionContext } from "@/contexts/chat-session-context";
@@ -946,7 +946,6 @@ const _mmWelcomeMsg = (): ChatMsg => ({
 const ChatComposer = memo(function ChatComposer({
   micState, onSend, onSlash, gw, onMicToggle, generating, onStop,
   ttsEnabled, onTtsToggle,
-  voiceDialogEnabled, onVoiceDialogToggle,
 }: {
   micState: MicLifecycleState;
   onSend: (text: string) => void;
@@ -958,8 +957,6 @@ const ChatComposer = memo(function ChatComposer({
   onStop: () => void;
   ttsEnabled: boolean;
   onTtsToggle: () => void;
-  voiceDialogEnabled: boolean;
-  onVoiceDialogToggle: () => void;
 }) {
   const { t } = useI18n();
   const [askText, setAskText] = useState("");
@@ -990,7 +987,7 @@ const ChatComposer = memo(function ChatComposer({
     // relative wrapper: SlashPopover pops up `bottom-full` above the composer.
     <div className="relative">
       <SlashPopover ref={slashRef} input={askText} gw={gw} onApply={setAskText} />
-    {/* items-end: composer surface 现在比三个 icon 按钮高, 按钮贴底对齐才不会飘在
+    {/* items-end: composer surface 现在比两个 icon 按钮高, 按钮贴底对齐才不会飘在
         输入框中部 (desktop 同样用 items-end)。 */}
     <div className="flex items-end gap-2 border-t p-3">
       <Button size="icon"
@@ -1020,20 +1017,8 @@ const ChatComposer = memo(function ChatComposer({
         onClick={onTtsToggle}>
         <Volume2 />
       </Button>
-      <Button size="icon"
-        outlined={!voiceDialogEnabled}
-        className={voiceDialogEnabled
-          ? "bg-amber-400 text-background-base hover:bg-amber-500 active:bg-amber-500"
-          : "hover:border-amber-400/70 hover:text-amber-300"}
-        title={voiceDialogEnabled
-          ? t.multimodal.voice.dialogOnTitle
-          : t.multimodal.voice.dialogOffTitle}
-        aria-pressed={voiceDialogEnabled}
-        onClick={onVoiceDialogToggle}>
-        <MessagesSquare />
-      </Button>
       {/* ★ Composer surface —— 单行: 输入区 + pill 同处一行、同一个 border 内。
-          发送/停止 在 surface 之外的右侧 (和左侧那三个 toggle 一样是框外控件);
+          发送/停止 在 surface 之外的右侧 (和左侧那两个 toggle 一样是框外控件);
           框内只放"编辑相关"的东西, 动作按钮不进编辑框。
           文字在 pill 处截止 —— 靠 flex 分栏而非 padding 预留: 输入区是
           `min-w-0 flex-1`, pill 是 `shrink-0`, 所以文字天然写到 pill 左边缘就
@@ -2814,6 +2799,27 @@ export function buildRows(messages: readonly ChatMsg[]): Row[] {
       continue;
     }
 
+    // ★ An assistant bubble that ended up carrying NOTHING must not split the
+    //   work segments. Prose is a deliberate barrier (it marks "the model said
+    //   something, a new round starts after this"), but a finished bubble with
+    //   no text and no reasoning says nothing — it is invisible on screen, yet
+    //   emitting a chat row for it still breaks bg adjacency, so the tool calls
+    //   before and after it render as two separate 处理过程 cards with no
+    //   visible reason between them. Streaming bubbles are kept: with no text
+    //   yet they are the live 💭 ThinkingLine and must still render.
+    const isInvisibleAssistant = (
+      m.role === "assistant"
+      && !m.streaming
+      && !m.text?.trim()
+      && !m.reasoning?.trim()
+      && !m.isError
+      && !m.kind            // not tool/status/clarify — those return earlier
+      && !m.monitorId
+      && !m.deepResearch
+      && !m.subRole
+    );
+    if (isInvisibleAssistant) continue;
+
     // Real prose (or an error / user turn) — barrier. Close the segment.
     if (m.text?.trim() || m.role === "user") pendingThinking = "";
     out.push({ type: "chat", msg: m });
@@ -2990,7 +2996,6 @@ const ChatColumn = memo(function ChatColumn({
   rows, renderRow, itemKey, atBottom, chatScrollRef, onChatScroll, scrollChatToBottom,
   chatAtBottomRef, isRecordingUI, asrPartial, asrBuffer,
   micState, ttsEnabled, onTtsToggle,
-  voiceDialogEnabled, onVoiceDialogToggle,
   generating, onStop, onSend, onSlash, gw, onMicToggle,
 }: {
   rows: Row[];
@@ -3007,8 +3012,6 @@ const ChatColumn = memo(function ChatColumn({
   micState: MicLifecycleState;
   ttsEnabled: boolean;
   onTtsToggle: () => void;
-  voiceDialogEnabled: boolean;
-  onVoiceDialogToggle: () => void;
   generating: boolean;
   onStop: () => void;
   onSend: (text: string) => void;
@@ -3053,8 +3056,6 @@ const ChatColumn = memo(function ChatColumn({
         micState={micState}
         ttsEnabled={ttsEnabled}
         onTtsToggle={onTtsToggle}
-        voiceDialogEnabled={voiceDialogEnabled}
-        onVoiceDialogToggle={onVoiceDialogToggle}
         generating={generating}
         onStop={onStop}
         onSend={onSend}
@@ -3876,8 +3877,7 @@ export default function MultimodalChatPage() {
   // 独立 TTS 语音播报开关 (与麦克风解耦)。默认关; 切换时通知后端 announcer。
   // toggleTts 定义在 pushTopToast 之后 (需引用它做"对话托管"拦截提示)。
   const [ttsEnabled, setTtsEnabled] = useState(false);
-  // 独立【对话模式】开关: 开 = VoiceAgent 分诊+决策+秒回+防误识别; 关 = 传统 ASR→主Agent.
-  // 【自动开麦】见后面 toggleVoiceDialog useCallback (放 startMic 之后, 引用得到).
+  // 对话模式状态仍由 session 恢复 / 麦喇叭托管逻辑使用; UI 不再提供入口按钮。
   const [voiceDialogEnabled, setVoiceDialogEnabled] = useState(false);
   const [messages, setMessages] = useState<ChatMsg[]>(() => [_mmWelcomeMsg()]);
   // ★ 聊天列表已改普通 div 全量渲染 (非虚拟化) —— 渲染成本随消息数线性增长, 所以这个
@@ -5026,6 +5026,15 @@ export default function MultimodalChatPage() {
       if (!isMine(ev)) return;
       const text = (ev.payload?.text || "").trim();
       if (!text) return;
+      // kind=process carries a background-process notification (async delegation
+      // batch complete, bash process done, ...). The gateway also submits that
+      // same text as a prompt, so it arrives again via message.user_echo and is
+      // persisted to history as a user message — rendering it here too showed it
+      // twice (once in the 处理过程 card, once as a "You" bubble). The bubble is
+      // the durable one (it replays from history after a refresh, this card does
+      // not), so drop the card and keep the bubble. The event itself must keep
+      // flowing: the desktop app uses it to refresh its background-process list.
+      if ((ev.payload?.kind || "") === "process") return;
       msgQueue.push({ action: "collapse_status", text });
       scheduleFlush();
     });
@@ -5388,10 +5397,37 @@ export default function MultimodalChatPage() {
         const turnId = ev.payload?.turn_id;
         if (!asrTransport.ownsEvent(ev.session_id, turnId)) return;
         const t = (ev.payload?.text || "").trim();
-        if (t) addMsg({
-          id: nid(), role: "user", text: t, voice: true,
-          requestId: ev.payload?.request_id,
-        });
+        if (t) {
+          // ★ Preallocate this turn's answer slot, exactly as sendAsk does for
+          //   the typed composer. Without it a voice turn behaved like a
+          //   backend-originated one: `ensureBubble` only runs on the first
+          //   message.delta / message.complete, so the answer bubble was
+          //   appended AFTER whatever tools had already run. The array became
+          //   `user, tool, assistant, tool` instead of `user, assistant, tool,
+          //   tool` — which renders the first 处理过程 card ABOVE the answer and
+          //   splits the turn's tool calls across two cards, since buildRows
+          //   merges only adjacent tool rows. Typed turns never showed this
+          //   because their slot is claimed at send time.
+          const rid = ev.payload?.request_id;
+          const key = rid || "__main__";
+          const answerId = nid();
+          const claim = !curAssistantId.current.get(key);
+          if (claim) curAssistantId.current.set(key, answerId);
+          setMessages((prev) => capMsgs([
+            ...prev,
+            { id: nid(), role: "user", text: t, voice: true, requestId: rid },
+            ...(claim ? [{
+              id: answerId,
+              role: "assistant" as const,
+              text: "",
+              streaming: true,
+              awaitingFirstDelta: true,
+              hasReasoning: false,
+              requestId: rid,
+            }] : []),
+          ]));
+          refs.current.isAnswering = true;
+        }
         setAsrPartial("");
         setAsrBuffer([]);
         if (typeof ev.session_id === "string" && typeof turnId === "string") {
@@ -6834,50 +6870,7 @@ export default function MultimodalChatPage() {
     else void startMic("manual_turn");
   }, [micState, stopMic, startMic, voiceDialogEnabled, pushTopToast, t]);
 
-  // 【对话模式】= 后台统一接管麦/喇叭 (用户方案: UI 麦/喇叭按钮态保持不变, 仅后台联动)。
-  //   ON  → ①后端 voice_dialog_toggle (使 is_speaker_on OR 对话态 → 强制 TTS; ASR final
-  //           走 v2 分诊) ②前端物理开麦 (getUserMedia 采集是唯一能真正识别的途径, 后端
-  //           无法凭空开麦; 麦按钮随之自然变红, 反映真实录音态)。喇叭按钮态不变。
-  //   OFF → ①后端 voice_dialog_toggle(false) ②物理关麦 → 一切恢复各自 _mm_asr_on/
-  //           _mm_tts_on 真实态。
-  const toggleVoiceDialog = useCallback(() => {
-    const recovery = voiceDialogRecoveryRef.current;
-    const next = !recovery.wantsVoiceDialog();
-    if (next && micState !== "idle") {
-      pushTopToast(t.multimodal.toasts.dialogModeMicBlocked, "info");
-      return;
-    }
-
-    const r = refs.current;
-    if (next) {
-      const activation = recovery.enable(r.gw ? r.sessionId : "");
-      setVoiceDialogEnabled(true);
-      if (activation) {
-        runVoiceDialogActivationRef.current(activation);
-      } else if (connected && sessionEstablishedRef.current && !r.sessionId) {
-        // Establishment already settled empty: fail closed instead of leaving
-        // a permanently blue button with no physical/backend owner.
-        failWaitingVoiceDialog();
-      } else {
-        pushTopToast(t.multimodal.toasts.dialogModeNoSession, "info");
-      }
-      return;
-    }
-
-    recovery.disable();
-    setVoiceDialogEnabled(false);
-    if (r.gw && r.sessionId) {
-      void r.gw.request("multimodal.voice_dialog_toggle", {
-        session_id: r.sessionId,
-        enabled: false,
-      }).catch(() => undefined);
-    }
-    if (micState !== "idle" || r.asrTransport?.current()?.mode === "continuous") {
-      void stopMic("cancel");
-    }
-  }, [connected, failWaitingVoiceDialog, micState, pushTopToast, stopMic]);
-
-  // ▶ 播放 button on assistant bubbles for text-input turns (voice-input turns
+  // ▶ 播放 button on assistant bubbles for text-input turns (voice-input turns)
   // auto-speak in the backend hook, so no button appears there).
   const playAssistantAudio = useCallback((text: string) => {
     const r = refs.current;
@@ -7150,8 +7143,6 @@ export default function MultimodalChatPage() {
           micState={micState}
           ttsEnabled={ttsEnabled}
           onTtsToggle={toggleTts}
-          voiceDialogEnabled={voiceDialogEnabled}
-          onVoiceDialogToggle={toggleVoiceDialog}
           generating={generating}
           onStop={stopAsk}
           onSend={sendAsk}

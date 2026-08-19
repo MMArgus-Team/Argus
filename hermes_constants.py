@@ -113,8 +113,8 @@ def get_hermes_home() -> Path:
 def get_default_hermes_root() -> Path:
     """Return the root Hermes directory for profile-level operations.
 
-    In standard deployments this is the platform-native Hermes home
-    (``~/.argus`` on POSIX, ``%LOCALAPPDATA%\\hermes`` on native Windows).
+    In standard deployments this is the platform-native Argus home
+    (``~/.argus`` on POSIX, ``%LOCALAPPDATA%\\argus`` on native Windows).
 
     In Docker or custom deployments where ``ARGUS_HOME`` points outside
     ``~/.argus`` (e.g. ``/opt/data``), returns ``ARGUS_HOME`` directly
@@ -257,7 +257,7 @@ def iter_hermes_node_dirs(home: Path | None = None) -> list[Path]:
     """Return Hermes-managed Node.js directories in preferred lookup order.
 
     Windows installs from ``scripts/install.ps1`` unpack portable Node directly
-    into ``%LOCALAPPDATA%\\hermes\\node``. POSIX installs use
+    into ``%LOCALAPPDATA%\\argus\\node``. POSIX installs use
     ``$ARGUS_HOME/node/bin``. Include both shapes on every platform so mixed
     or migrated installs still work.
     """

@@ -243,7 +243,6 @@ def describe_profile(
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
-            temperature=0.3,
             max_tokens=400,
             timeout=timeout or 60,
             extra_body=get_auxiliary_extra_body() or None,

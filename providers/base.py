@@ -17,10 +17,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Sentinel for "omit temperature entirely" (Kimi: server manages it)
-OMIT_TEMPERATURE = object()
-
-
 def _profile_user_agent() -> str:
     """Return a ``hermes-cli/<version>`` UA string, with a stable fallback.
 
@@ -121,8 +117,6 @@ class ProviderProfile:
     default_headers: dict[str, str] = field(default_factory=dict)
 
     # ── Request-level quirks ─────────────────────────────────
-    # Temperature: None = use caller's default, OMIT_TEMPERATURE = don't send
-    fixed_temperature: Any = None
     default_max_tokens: int | None = None
     default_aux_model: str = (
         ""  # cheap model for auxiliary tasks (compression, vision, etc.)

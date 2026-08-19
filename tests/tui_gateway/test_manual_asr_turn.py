@@ -411,34 +411,30 @@ def test_continuous_remains_vad_driven_but_cancel_is_abortive(manual_runtime):
     ]
 
 
-def test_explicit_manual_overrides_stale_dialog_flag(manual_runtime):
+def test_explicit_manual_does_not_create_dialog_state(manual_runtime):
     sid, session, engine, _emitted, submitted = manual_runtime
-    # The dialog-off RPC can be lost with the renderer WebSocket.  A modern
-    # explicit start is the authoritative mode on reconnect.
-    session["_mm_voice_dialog_on"] = True
+    # Manual capture buffers VAD segments until the explicit stop.
 
     started = _start(sid, mode="manual_turn")
     engine.on_final("\u505c\u987f\u4e0d\u80fd\u81ea\u52a8\u53d1\u9001")
 
     assert started["mode"] == "manual_turn"
-    assert session["_mm_voice_dialog_on"] is False
+    assert "_mm_voice_dialog_on" not in session
     assert submitted == []
     assert _stop(sid)["submitted"] is True
 
-    # A genuine dialog/rearm request is still explicitly continuous and keeps
-    # the dialog flag intact, preserving the existing VAD-driven semantics.
-    session["_mm_voice_dialog_on"] = True
+    # Continuous remains a transport-level VAD mode without creating product
+    # conversation-mode state.
     started_dialog = _start(
         sid, turn_id="desktop-asr-dialog", mode="continuous")
     assert started_dialog["mode"] == "continuous"
-    assert session["_mm_voice_dialog_on"] is True
+    assert "_mm_voice_dialog_on" not in session
 
 
-def test_explicit_continuous_start_atomically_enables_dialog_mode(
+def test_explicit_continuous_does_not_create_dialog_state(
     manual_runtime,
 ):
     sid, session, engine, _emitted, _submitted = manual_runtime
-    session["_mm_voice_dialog_on"] = False
 
     started = _start(
         sid, turn_id="desktop-asr-dialog", mode="continuous")
@@ -448,54 +444,36 @@ def test_explicit_continuous_start_atomically_enables_dialog_mode(
         "turn_id": "desktop-asr-dialog",
         "mode": "continuous",
     }
-    assert session["_mm_voice_dialog_on"] is True
+    assert "_mm_voice_dialog_on" not in session
 
-    # A rearm can repeat after losing the first RPC response.  Repair a stale
-    # flag without opening another Qwen session, before its next VAD final.
-    session["_mm_voice_dialog_on"] = False
+    # A repeated transport request is idempotent and opens no second session.
     repeated = _start(
         sid, turn_id="desktop-asr-dialog", mode="continuous")
     assert repeated["enabled"] is True
     assert repeated["idempotent"] is True
-    assert session["_mm_voice_dialog_on"] is True
+    assert "_mm_voice_dialog_on" not in session
     assert engine.starts == 1
 
 
-def test_stale_transport_cannot_toggle_voice_dialog_or_tts(manual_runtime):
+def test_stale_transport_cannot_toggle_tts(manual_runtime):
     sid, session, _engine, _emitted, _submitted = manual_runtime
     transport_a = object()
     transport_b = object()
     session["transport"] = transport_b
-    session["_mm_voice_dialog_on"] = True
     session["_mm_tts_on"] = True
 
     token_a = server.bind_transport(transport_a)
     try:
-        stale_dialog = server._methods["multimodal.voice_dialog_toggle"](
-            "rpc-stale-dialog", {"session_id": sid, "enabled": False},
-        )["result"]
         stale_tts = server._methods["multimodal.tts_toggle"](
             "rpc-stale-tts", {"session_id": sid, "enabled": False},
         )["result"]
     finally:
         server.reset_transport(token_a)
 
-    assert stale_dialog == {
-        "ok": False, "enabled": True, "reason": "stale_transport"}
     assert stale_tts == {
         "ok": False, "enabled": True, "reason": "stale_transport"}
-    assert session["_mm_voice_dialog_on"] is True
     assert session["_mm_tts_on"] is True
 
-    token_b = server.bind_transport(transport_b)
-    try:
-        accepted = server._methods["multimodal.voice_dialog_toggle"](
-            "rpc-current-dialog", {"session_id": sid, "enabled": False},
-        )["result"]
-    finally:
-        server.reset_transport(token_b)
-    assert accepted == {"ok": True, "enabled": False}
-    assert session["_mm_voice_dialog_on"] is False
 
 
 def test_stop_before_start_tombstones_late_activation(manual_runtime):

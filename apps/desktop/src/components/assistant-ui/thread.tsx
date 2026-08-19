@@ -120,6 +120,7 @@ import { $voicePlayback } from '@/store/voice-playback'
 import { $generatingToolName } from '@/store/tool-generating'
 import { $toolDisclosureStates, setToolDisclosureOpenBatch } from '@/store/tool-view'
 import { $isWindowResizing } from '@/store/window-resize'
+import { isInjectedNotification } from './thread-timeline-data'
 
 type ThreadLoadingState = 'response' | 'session'
 interface RestoreMessageTarget {
@@ -1647,12 +1648,23 @@ const StopGlyph = <StopFilled aria-hidden className="size-3.5 -translate-y-px" /
 // a synthetic system row mid-loop). They are NOT something the human typed, so
 // render them as a compact system-style notice instead of a user bubble.
 // Shape: see tools/process_registry.py format_process_notification().
-const PROCESS_NOTIFICATION_RE = /^\[IMPORTANT: Background process [\s\S]*\]$/
+// Predicate lives in thread-timeline-data so the thread body and the timeline
+// agree on what counts as injected — they used to keep separate copies of the
+// pattern.
 
 const ProcessNotificationNote: FC<{ text: string }> = ({ text }) => {
-  const body = text.replace(/^\[IMPORTANT:\s*/, '').replace(/\]$/, '')
+  // Unwrap whichever bracket shape this is: "[IMPORTANT: …]" closes at the very
+  // end, while "[ASYNC DELEGATION BATCH COMPLETE — id]" closes on line 1 with
+  // the report following. Strip a trailing bracket only when it really is the
+  // last character, then take the first line as the headline.
+  const trimmed = text.trim()
+  const body = (trimmed.endsWith(']') ? trimmed.slice(0, -1) : trimmed)
+    .replace(/^\[IMPORTANT:\s*/, '')
+    .replace(/^\[/, '')
   const newline = body.indexOf('\n')
-  const headline = (newline === -1 ? body : body.slice(0, newline)).trim()
+  const headline = (newline === -1 ? body : body.slice(0, newline))
+    .replace(/\]$/, '')
+    .trim()
   const detail = newline === -1 ? '' : body.slice(newline + 1).trim()
 
   return (
@@ -1805,7 +1817,7 @@ const UserMessage: FC<{
 
   // Injected background-process notification, not a human prompt — render the
   // compact system-style notice (after all hooks above have run).
-  if (PROCESS_NOTIFICATION_RE.test(messageText.trim())) {
+  if (isInjectedNotification(messageText)) {
     return (
       <MessagePrimitive.Root
         className="flex w-full min-w-0 flex-col items-stretch"

@@ -2512,153 +2512,46 @@ class TestIsConnectionError:
         assert _is_connection_error(err) is False
 
 
-class TestKimiTemperatureOmitted:
-    """Kimi/Moonshot models should have temperature OMITTED from API kwargs.
+class TestNoSamplingParamsSent:
+    """Auxiliary requests must carry no sampling params at all.
 
-    The Kimi gateway selects the correct temperature server-side based on the
-    active mode (thinking → 1.0, non-thinking → 0.6).  Sending any temperature
-    value conflicts with gateway-managed defaults.
+    Replaces TestKimiTemperatureOmitted, which pinned a per-model
+    fixed/omit table: Kimi got temperature stripped, everyone else kept it.
+    That table was one of four overlapping workarounds for gateways that
+    manage sampling server-side, and they still left gaps (the voice path
+    reached none of them and 400'd on every call). temperature/top_p/top_k
+    are now dropped for every model — see
+    agent/transports/chat_completions.py build_kwargs.
     """
 
-    @pytest.mark.parametrize(
-        "model",
-        [
-            "kimi-for-coding",
-            "kimi-k2.5",
-            "kimi-k2.6",
-            "kimi-k2-turbo-preview",
-            "kimi-k2-0905-preview",
-            "kimi-k2-thinking",
-            "kimi-k2-thinking-turbo",
-            "kimi-k2-instruct",
-            "kimi-k2-instruct-0905",
-            "moonshotai/kimi-k2.5",
-            "moonshotai/Kimi-K2-Thinking",
-            "moonshotai/Kimi-K2-Instruct",
-        ],
-    )
-    def test_kimi_models_omit_temperature(self, model):
-        """No kimi model should have a temperature key in kwargs."""
-        from agent.auxiliary_client import _build_call_kwargs
-
-        kwargs = _build_call_kwargs(
-            provider="kimi-coding",
-            model=model,
-            messages=[{"role": "user", "content": "hello"}],
-            temperature=0.3,
-        )
-
-        assert "temperature" not in kwargs
-
-    def test_kimi_for_coding_no_temperature_when_none(self):
-        """When caller passes temperature=None, still no temperature key."""
-        from agent.auxiliary_client import _build_call_kwargs
-
-        kwargs = _build_call_kwargs(
-            provider="kimi-coding",
-            model="kimi-for-coding",
-            messages=[{"role": "user", "content": "hello"}],
-            temperature=None,
-        )
-
-        assert "temperature" not in kwargs
-
-    def test_sync_call_omits_temperature(self):
-        client = MagicMock()
-        client.base_url = "https://api.kimi.com/coding/v1"
-        response = MagicMock()
-        client.chat.completions.create.return_value = response
-
-        with patch(
-            "agent.auxiliary_client._get_cached_client",
-            return_value=(client, "kimi-for-coding"),
-        ), patch(
-            "agent.auxiliary_client._resolve_task_provider_model",
-            return_value=("auto", "kimi-for-coding", None, None, None),
-        ):
-            result = call_llm(
-                task="session_search",
-                messages=[{"role": "user", "content": "hello"}],
-                temperature=0.1,
-            )
-
-        assert result is response
-        kwargs = client.chat.completions.create.call_args.kwargs
-        assert kwargs["model"] == "kimi-for-coding"
-        assert "temperature" not in kwargs
-
-    @pytest.mark.asyncio
-    async def test_async_call_omits_temperature(self):
-        client = MagicMock()
-        client.base_url = "https://api.kimi.com/coding/v1"
-        response = MagicMock()
-        client.chat.completions.create = AsyncMock(return_value=response)
-
-        with patch(
-            "agent.auxiliary_client._get_cached_client",
-            return_value=(client, "kimi-for-coding"),
-        ), patch(
-            "agent.auxiliary_client._resolve_task_provider_model",
-            return_value=("auto", "kimi-for-coding", None, None, None),
-        ):
-            result = await async_call_llm(
-                task="session_search",
-                messages=[{"role": "user", "content": "hello"}],
-                temperature=0.1,
-            )
-
-        assert result is response
-        kwargs = client.chat.completions.create.call_args.kwargs
-        assert kwargs["model"] == "kimi-for-coding"
-        assert "temperature" not in kwargs
-
-    @pytest.mark.parametrize(
-        "model",
-        [
-            "anthropic/claude-sonnet-4-6",
-            "gpt-5.4",
-            "deepseek-chat",
-        ],
-    )
-    def test_non_kimi_models_preserve_temperature(self, model):
-        from agent.auxiliary_client import _build_call_kwargs
-
+    @pytest.mark.parametrize("model", [
+        "moonshot-v1-8k", "kimi-k2-0711-preview", "anthropic/claude-sonnet-4-6",
+        "gpt-5.4", "deepseek-chat", "qwen3.7-plus",
+    ])
+    def test_temperature_never_reaches_kwargs(self, model):
         kwargs = _build_call_kwargs(
             provider="openrouter",
             model=model,
             messages=[{"role": "user", "content": "hello"}],
             temperature=0.3,
         )
-
-        assert kwargs["temperature"] == 0.3
-
-    @pytest.mark.parametrize(
-        "base_url",
-        [
-            "https://api.moonshot.ai/v1",
-            "https://api.moonshot.cn/v1",
-            "https://api.kimi.com/coding/v1",
-        ],
-    )
-    def test_kimi_k2_5_omits_temperature_regardless_of_endpoint(self, base_url):
-        """Temperature is omitted regardless of which Kimi endpoint is used."""
-        from agent.auxiliary_client import _build_call_kwargs
-
-        kwargs = _build_call_kwargs(
-            provider="kimi-coding",
-            model="kimi-k2.5",
-            messages=[{"role": "user", "content": "hello"}],
-            temperature=0.1,
-            base_url=base_url,
+        assert "temperature" not in kwargs, (
+            f"{model}: callers may still pass temperature for readability, but "
+            "it must never be forwarded"
         )
 
-        assert "temperature" not in kwargs
-
-
-# ---------------------------------------------------------------------------
-# async_call_llm payment / connection fallback (#7512 bug 2)
-# ---------------------------------------------------------------------------
-
+    def test_top_p_and_top_k_absent_too(self):
+        kwargs = _build_call_kwargs(
+            provider="openrouter",
+            model="qwen3.7-plus",
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+        )
+        for key in ("top_p", "top_k"):
+            assert key not in kwargs
+        # The request is still well-formed.
+        assert kwargs["model"] == "qwen3.7-plus"
+        assert kwargs["messages"]
 
 class TestStaleBaseUrlWarning:
     """_resolve_auto() warns when OPENAI_BASE_URL conflicts with config provider (#5161)."""

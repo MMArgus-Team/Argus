@@ -15,7 +15,6 @@ import pytest
 
 from agent.auxiliary_client import (
     _compression_threshold_for_model,
-    _fixed_temperature_for_model,
     _is_arcee_trinity_thinking,
     _is_codex_gpt55,
 )
@@ -50,17 +49,6 @@ def test_is_arcee_trinity_thinking_matches(model: str) -> None:
 )
 def test_is_arcee_trinity_thinking_rejects_non_matches(model) -> None:
     assert _is_arcee_trinity_thinking(model) is False
-
-
-def test_fixed_temperature_for_trinity_thinking() -> None:
-    assert _fixed_temperature_for_model("trinity-large-thinking") == 0.5
-    assert _fixed_temperature_for_model("arcee-ai/trinity-large-thinking") == 0.5
-
-
-def test_fixed_temperature_sibling_arcee_models_unaffected() -> None:
-    # Preview and mini do not pin temperature — caller chooses its default.
-    assert _fixed_temperature_for_model("trinity-large-preview") is None
-    assert _fixed_temperature_for_model("trinity-mini") is None
 
 
 def test_compression_threshold_for_trinity_thinking() -> None:

@@ -2094,7 +2094,6 @@ DEFAULT_CONFIG = {
         #  front_loop_interval/temperature/max_tokens/recent_frames/min_speak_interval
         #  + cruise_macro_summary_max_chars。)
         # Continuation (after search+recall findings land)
-        "cont_temperature": 0.4,
         "cont_max_tokens": 1536,
         "cont_recent_frames": 12,
         "cont_now_frames": 2,
@@ -2105,7 +2104,6 @@ DEFAULT_CONFIG = {
         "query_worker_max_pending": 8,
         # ② MemoryWriter — periodic wake; writes L1 micro → L2/L3
         "writer_wake_interval": 5.0,
-        "writer_temperature": 0.2,
         "writer_max_tokens": 5000,
         "writer_recent_frames": 30,
         "writer_image_max_side": 1280,
@@ -2130,14 +2128,12 @@ DEFAULT_CONFIG = {
         "writer_event_max_macros": 15,
         "writer_event_max_micros": 30,
         # ③ WatcherAgent ReAct orchestration brain (v33: router_* renamed react_*)
-        "react_temperature": 0.2,
         "react_max_tokens": 512,
         "react_recent_frames": 8,
         "react_recent_history_turns": 16,
         "react_max_rounds": 4,
         "react_round_max_tokens": 2048,
         "react_search_tasks_max": 5,
-        "watcher_answer_temperature": 0.4,
         "watcher_answer_max_tokens": 1536,
         # ④ SearchWorker — external retrieval (resident under Router)
         # Uses the bundled agent/multimodal/sly_search_tool.py (RAG image/text
@@ -2146,12 +2142,10 @@ DEFAULT_CONFIG = {
         # or search_tool_path to point at a different tool module.
         "enable_search": True,
         "search_tool_path": "",      # "" = use bundled sly_search_tool.py
-        "search_temperature": 0.2,
         "search_max_tokens": 4096,
         "search_max_tool_rounds": 3,
         "search_recent_frames": 1,   # only the anchor frame matters for image search
         # ⑤ RecallWorker — memory-graph query (resident under Router)
-        "recall_temperature": 0.2,
         "recall_max_tokens": 2048,
         "recall_max_rounds": 4,
         "recall_topk_micro": 5,
@@ -2179,7 +2173,6 @@ DEFAULT_CONFIG = {
         "mem_l3_super_min_macro": 4,
         "mem_l3_super_max_duration": 900.0,
         "mem_entity_alias_threshold": 0.85,
-        "mem_aggregator_temperature": 0.3,
         "mem_aggregator_max_tokens": 2048,
         "agg_l2_frames": 50,
         "agg_l3_frames": 128,
@@ -2192,7 +2185,6 @@ DEFAULT_CONFIG = {
         "reviewer_recent_ratio": 0.6,
         "reviewer_recent_window_sec": 300.0,
         "reviewer_min_micros": 3,
-        "reviewer_temperature": 0.2,
         "reviewer_max_tokens": 3072,
         "reviewer_max_actions_per_round": 8,
         "reviewer_min_seg_dur_for_split": 4.0,
@@ -2347,8 +2339,6 @@ DEFAULT_CONFIG = {
                     {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
                 ],
                 "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
-                "reference_temperature": 0.6,
-                "aggregator_temperature": 0.4,
                 "max_tokens": 4096,
                 "enabled": True,
             }

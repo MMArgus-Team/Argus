@@ -313,7 +313,8 @@ class SceneDhashController:
         # vLLM/SGLang 的正确格式是 chat_template_kwargs.thinking=False (布尔), 不是 enable_thinking。
         if "kimi-k2" in (self.model or "").lower():
             base["extra_body"] = {"chat_template_kwargs": {"thinking": False}}
-        default_attempt = dict(base, max_tokens=120, temperature=0.0)
+        # 采样参数一律不发 (见 transports/chat_completions.py build_kwargs)。
+        default_attempt = dict(base, max_tokens=120)
         portable_attempt = dict(base, max_completion_tokens=256)
         if "gpt-5.6-luna" in (self.model or "").lower():
             attempts = [portable_attempt]

@@ -890,8 +890,6 @@ export interface Translations {
       startSpeaking: string;
       ttsOnTitle: string;
       ttsOffTitle: string;
-      dialogOnTitle: string;
-      dialogOffTitle: string;
       playVoice: string;
       stopSpeaking: string;
     };

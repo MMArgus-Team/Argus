@@ -1830,9 +1830,21 @@ def _run_single_child(
         completed = result.get("completed", False)
         interrupted = result.get("interrupted", False)
         api_calls = result.get("api_calls", 0)
+        # ★ A classified failure (API/stream error after retries, rate limit with
+        #   no fallback, ...) still returns a NON-EMPTY final_response: the loop
+        #   puts its human-readable message there, e.g. "API call failed after 3
+        #   retries: ..." (agent/conversation_loop.py). Judging status by
+        #   "summary is non-empty" alone therefore reported a total failure as
+        #   ✓ completed, and because entry["error"] is only attached on the
+        #   failed branch the real reason was dropped — the parent agent then
+        #   read an error string as if it were the subagent's answer.
+        failed = bool(result.get("failed"))
+        error_detail = str(result.get("error") or "").strip()
 
         if interrupted:
             status = "interrupted"
+        elif failed or error_detail:
+            status = "failed"
         elif summary:
             # A summary means the subagent produced usable output.
             # exit_reason ("completed" vs "max_iterations") already
@@ -1840,6 +1852,13 @@ def _run_single_child(
             status = "completed"
         else:
             status = "failed"
+
+        # When final_response is merely the failure wrapper around ``error`` it
+        # carries no output of its own; presenting it as "Partial output" would
+        # just print the same sentence twice. A genuine partial answer that
+        # happens to accompany an error is kept.
+        if status == "failed" and error_detail and error_detail in summary:
+            summary = ""
 
         # Build tool trace from conversation messages (already in memory).
         # Uses tool_call_id to correctly pair parallel tool calls with results.

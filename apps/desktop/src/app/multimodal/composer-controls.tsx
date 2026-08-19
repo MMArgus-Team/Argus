@@ -3,7 +3,7 @@ import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { useI18n } from '@/i18n'
-import { Loader2, MessageSquareText, Mic, Volume2 } from '@/lib/icons'
+import { Loader2, Mic, Volume2 } from '@/lib/icons'
 import { pushMmToast } from '@/store/multimodal-deep'
 import {
   $mmAsrBuffer,
@@ -16,7 +16,6 @@ import {
   startMic,
   stopMic,
   toggleMultimodalTts,
-  toggleMultimodalVoiceDialog,
 } from '@/store/multimodal-voice'
 
 /**
@@ -61,7 +60,7 @@ export function MultimodalAsrBar() {
  * alongside the add-context menu:
  *   - 语音: streaming ASR (startMic/stopMic). Outline idle · destructive
  *     recording · spinner connecting — mirrors the multimodal composer.
- *   - 语音播报 / 对话模式.
+ *   - 语音播报.
  *
  * These are additive; add-context / model / send stay ChatBar-native.
  */
@@ -136,12 +135,6 @@ export function MultimodalComposerControls() {
     toggleMultimodalTts()
   }
 
-  const toggleVoiceDialogGuarded = () => {
-    if (!toggleMultimodalVoiceDialog()) {
-      pushMmToast({ level: 'error', text: c.dialogNeedFinishMic })
-    }
-  }
-
   return (
     <div className="flex items-center gap-1">
       <Button
@@ -175,29 +168,6 @@ export function MultimodalComposerControls() {
         variant={ttsEnabled ? 'default' : 'outline'}
       >
         <Volume2 className="size-4" />
-      </Button>
-      {/* 对话模式 (Honey Amber #fbbf24) — 开 = VoiceAgent 分诊+秒回+防误识别;
-          与 web MultimodalChatPage 同款 (Nous DS button.tsx 的实心 vs outlined,
-          desktop shadcn 用 variant='default' vs 'outline' + className 覆盖色).
-          cn = tailwind-merge, bg-amber-400 会覆盖默认 bg-primary。 */}
-      <Button
-        aria-pressed={voiceDialogEnabled}
-        className={
-          voiceDialogEnabled
-            ? 'size-7 shrink-0 bg-amber-400 text-neutral-900 hover:bg-amber-500'
-            : 'size-7 shrink-0 hover:text-amber-300'
-        }
-        onClick={toggleVoiceDialogGuarded}
-        size="icon-sm"
-        title={
-          voiceDialogEnabled
-            ? c.dialogOnTitle
-            : c.dialogOffTitle
-        }
-        type="button"
-        variant={voiceDialogEnabled ? 'default' : 'outline'}
-      >
-        <MessageSquareText className="size-4" />
       </Button>
     </div>
   )

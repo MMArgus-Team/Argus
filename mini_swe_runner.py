@@ -49,14 +49,9 @@ def _effective_temperature_for_model(
     Returns ``None`` when the model manages temperature server-side (Kimi);
     callers must omit the ``temperature`` kwarg entirely in that case.
     """
-    try:
-        from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
-    except Exception:
-        return None
-    result = _fixed_temperature_for_model(model, base_url)
-    if result is OMIT_TEMPERATURE:
-        return None  # caller must omit temperature
-    return result
+    # Sampling params are no longer sent anywhere (see
+    # agent/transports/chat_completions.py build_kwargs). Always omit.
+    return None
 
 
 

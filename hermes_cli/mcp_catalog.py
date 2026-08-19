@@ -162,7 +162,7 @@ def _parse_manifest(path: Path) -> CatalogEntry:
     if mv != _MANIFEST_VERSION:
         raise CatalogError(
             f"{path}: manifest_version {mv!r} unsupported "
-            f"(this Hermes understands version {_MANIFEST_VERSION})"
+            f"(this Argus understands version {_MANIFEST_VERSION})"
         )
 
     name = data.get("name") or ""
@@ -304,7 +304,7 @@ def catalog_diagnostics() -> List[tuple]:
     Returns a list of ``(entry_name, kind, message)`` tuples where ``kind``
     is one of:
       - ``future_manifest`` — manifest_version is newer than this Hermes
-        understands. Update Hermes to install this entry.
+        understands. Update Argus to install this entry.
       - ``invalid`` — manifest is malformed in some other way (caught by
         CI for shipped manifests; user-modified manifests can hit this).
     """
@@ -744,7 +744,7 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     print(color(
         f"  ✓ Installed '{entry.name}' "
         f"({'enabled' if enable else 'disabled'}). "
-        f"Start a new Hermes session to load its tools.",
+        f"Start a new Argus session to load its tools.",
         Colors.GREEN,
     ))
     if entry.post_install:

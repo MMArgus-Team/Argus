@@ -235,14 +235,6 @@ def _normalize_aux_provider(provider: Optional[str]) -> str:
     return _PROVIDER_ALIASES.get(normalized, normalized)
 
 
-# Sentinel: when returned by _fixed_temperature_for_model(), callers must
-# strip the ``temperature`` key from API kwargs entirely so the provider's
-# server-side default applies.  Kimi/Moonshot models manage temperature
-# internally — sending *any* value (even the "correct" one) can conflict
-# with gateway-side mode selection (thinking → 1.0, non-thinking → 0.6).
-OMIT_TEMPERATURE: object = object()
-
-
 def _is_kimi_model(model: Optional[str]) -> bool:
     """True for any Kimi / Moonshot model that manages temperature server-side.
 
@@ -292,36 +284,6 @@ def _is_codex_gpt55(model: Optional[str], provider: Optional[str] = None) -> boo
         return False
     bare = (model or "").strip().lower().rsplit("/", 1)[-1]
     return bare == "gpt-5.5" or bare.startswith("gpt-5.5-") or bare.startswith("gpt-5.5.")
-
-
-def _fixed_temperature_for_model(
-    model: Optional[str],
-    base_url: Optional[str] = None,
-) -> "Optional[float] | object":
-    """Return a temperature directive for models with strict contracts.
-
-    Returns:
-        ``OMIT_TEMPERATURE`` — caller must remove the ``temperature`` key so the
-            provider chooses its own default.  Used for all Kimi / Moonshot
-            models whose gateway selects temperature server-side.
-        ``float`` — a specific value the caller must use (reserved for future
-            models with fixed-temperature contracts).
-        ``None`` — no override; caller should use its own default.
-    """
-    if _is_kimi_model(model):
-        logger.debug("Omitting temperature for Kimi model %r (server-managed)", model)
-        return OMIT_TEMPERATURE
-    # ★ bare is lowercase (see .lower() above), so the comparison MUST be
-    #   lowercase too. Previously "GPT-5.6 Luna" (uppercase literal) was used,
-    #   which never matched — Luna was silently missed by this shim and
-    #   subsequent calls that pinned a temperature returned 400 from Luna
-    #   doc.devops. Fixed 2026-08-17.
-    bare = (model or "").strip().lower().rsplit("/", 1)[-1]
-    if bare == "gpt-5.6 luna" or bare.startswith("gpt-5.6 luna-"):
-        return OMIT_TEMPERATURE
-    if _is_arcee_trinity_thinking(model):
-        return 0.5
-    return None
 
 
 def _compression_threshold_for_model(
@@ -1137,13 +1099,9 @@ class _AnthropicCompletionsAdapter:
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
         )
-        # Opus 4.7+ rejects any non-default temperature/top_p/top_k; only set
-        # temperature for models that still accept it. build_anthropic_kwargs
-        # additionally strips these keys as a safety net — keep both layers.
-        if temperature is not None:
-            from agent.anthropic_adapter import _forbids_sampling_params
-            if not _forbids_sampling_params(model):
-                anthropic_kwargs["temperature"] = temperature
+        # Sampling params are never sent on the auxiliary path (see
+        # _build_aux_chat_kwargs). Extended thinking still gets its mandatory
+        # temperature=1 from anthropic_adapter itself.
 
         response = create_anthropic_message(self._client, anthropic_kwargs)
         _transport = get_transport("anthropic_messages")
@@ -5484,23 +5442,14 @@ def _build_call_kwargs(
         "timeout": timeout,
     }
 
-    fixed_temperature = _fixed_temperature_for_model(model, base_url)
-    if fixed_temperature is OMIT_TEMPERATURE:
-        temperature = None  # strip — let server choose
-    elif fixed_temperature is not None:
-        temperature = fixed_temperature
-
-    # Opus 4.7+ rejects any non-default temperature/top_p/top_k — silently
-    # drop here so auxiliary callers that hardcode temperature (e.g. 0 on
-    # structured-JSON extraction) don't 400 the moment
-    # the aux model is flipped to 4.7.
-    if temperature is not None:
-        from agent.anthropic_adapter import _forbids_sampling_params
-        if _forbids_sampling_params(model):
-            temperature = None
-
-    if temperature is not None:
-        kwargs["temperature"] = temperature
+    # ★ temperature is accepted for call compatibility and then discarded —
+    #   auxiliary requests no longer send sampling params. See the rationale in
+    #   agent/transports/chat_completions.py's build_kwargs: per-provider
+    #   negotiation of temperature/top_p/top_k produced four overlapping
+    #   workarounds and still 400'd. Provider defaults are the contract.
+    #   The parameter stays in the signature so the ~30 existing callers that
+    #   pass temperature=0.2/0.3 keep working without a coordinated edit.
+    del temperature
 
     if max_tokens is not None:
         # We do NOT cap output by default. Most chat-completions providers treat
@@ -5806,33 +5755,6 @@ def call_llm(
             return _validate_llm_response(
                 client.chat.completions.create(**kwargs), task)
     except Exception as first_err:
-        if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
-            retry_kwargs = dict(kwargs)
-            retry_kwargs.pop("temperature", None)
-            logger.info(
-                "Auxiliary %s: provider rejected temperature; retrying once without it",
-                task or "call",
-            )
-            try:
-                return _validate_llm_response(
-                    client.chat.completions.create(**retry_kwargs), task)
-            except Exception as retry_err:
-                retry_err_str = str(retry_err)
-                # If retry still fails, fall through to the max_tokens /
-                # payment / auth chains below using the temperature-stripped
-                # kwargs.  Re-raise only if the retry hit something those
-                # chains won't handle.
-                if not (
-                    _is_payment_error(retry_err)
-                    or _is_connection_error(retry_err)
-                    or _is_auth_error(retry_err)
-                    or "max_tokens" in retry_err_str
-                    or "unsupported_parameter" in retry_err_str
-                ):
-                    raise
-                first_err = retry_err
-                kwargs = retry_kwargs
-
         err_str = str(first_err)
         # ZAI vision models (glm-4v-flash etc.) return error code 1210
         # ("API 调用参数有误") when max_tokens is passed on multimodal
@@ -6331,29 +6253,6 @@ async def async_call_llm(
             return _validate_llm_response(
                 await client.chat.completions.create(**kwargs), task)
     except Exception as first_err:
-        if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
-            retry_kwargs = dict(kwargs)
-            retry_kwargs.pop("temperature", None)
-            logger.info(
-                "Auxiliary %s (async): provider rejected temperature; retrying once without it",
-                task or "call",
-            )
-            try:
-                return _validate_llm_response(
-                    await client.chat.completions.create(**retry_kwargs), task)
-            except Exception as retry_err:
-                retry_err_str = str(retry_err)
-                if not (
-                    _is_payment_error(retry_err)
-                    or _is_connection_error(retry_err)
-                    or _is_auth_error(retry_err)
-                    or "max_tokens" in retry_err_str
-                    or "unsupported_parameter" in retry_err_str
-                ):
-                    raise
-                first_err = retry_err
-                kwargs = retry_kwargs
-
         err_str = str(first_err)
         # ZAI vision models (glm-4v-flash etc.) return error code 1210
         # ("API 调用参数有误") when max_tokens is passed on multimodal

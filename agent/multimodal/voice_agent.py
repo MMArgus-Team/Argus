@@ -23,11 +23,11 @@ from typing import Any, Callable, Optional, List
 
 from agent.multimodal.voice_agent_context import (
     build_world_snapshot,
-    decide_speak,
     judge_intent_eou_local,
     judge_intent_eou_remote,
     phrase_utterance,
 )
+from agent.multimodal.voice_trace import vtrace
 
 log = logging.getLogger("hermes.multimodal.voice_agent")
 
@@ -66,8 +66,7 @@ class SpeakItem:
     # 供拟词 LLM 对齐"这条回复是回哪个问题": 主 Agent 多并发 → 结果逆序到达时若无这条,
     # 拟词只能按 recent_dialogue 猜, 极易张冠李戴。带上就是"该结果的原问题=X, 请围绕它口播"。
     origin_query: str = ""
-    # 用户开口计数快照 (提交时的 _user_utterance_seq). monitor/watcher/main_agent_reply
-    # 都记录, 用于播前过期裁剪: 用户已推进则丢/降级/让 decide_speak 判。
+    # 用户开口计数快照，仅保留给旧委派结果的兼容元数据。
     user_seq_at_submit: int = 0
     created_at: float = field(default_factory=time.time)
 
@@ -78,9 +77,7 @@ class UserTask:
     seq: int                                 # 提交顺序 (作为 tiebreaker, 用户作业按此排)
     user_text: str                           # 用户说的话 (原样转交给主 Agent)
     submitted_at: float = field(default_factory=time.time)
-    # ★ 过期校验(方案B): 委派发起时的"用户开口计数"快照。结果回来时比对
-    #   VoiceAgent._user_utterance_seq —— 没变=委派后用户没再开口→必播;
-    #   变了=用户期间又说了话(可能改问题/取消)→过 decide_speak 判该不该念。
+    # 委派发起时的用户开口计数快照（兼容字段）。
     user_seq_at_submit: int = 0
 
 
@@ -311,36 +308,16 @@ class VoiceAgent:
             self._thread = None
 
     # ══════════════════════════════════════════════════════════════
-    # 麦+喇叭同开守卫 (设计 §1)
+    # TTS output gate
     # ══════════════════════════════════════════════════════════════
     def is_interactive(self) -> bool:
-        """独立"对话模式"开关: session["_mm_voice_dialog_on"]=True 时启用.
-
-        与麦(_mm_asr_on)/喇叭(_mm_tts_on)按钮完全解耦 —— 那两个按钮只管
-        传统 ASR 识别和 TTS 播报; 对话模式是独立的第三层开关, 前端由"对话"
-        图标按钮控制, 打开后 ASR final 才走 VoiceAgent v2 分诊+决策+拟词流程.
-
-        ★ 只用于【输入侧】: 决定 ASR final 是否走 v2 分诊 (submit_user). 【输出侧】
-          (深研/monitor/主 agent 回复的 TTS 播报) 用 is_speaker_on(), 因为播报语义
-          属于"喇叭"开关, 与"对话交互"无关。
-        """
-        try:
-            return bool(self._session.get("_mm_voice_dialog_on"))
-        except Exception:
-            return False
+        """Compatibility guard for retired input-routing code paths."""
+        return False
 
     def is_speaker_on(self) -> bool:
-        """输出侧播报门控 (TTS 唯一强制门 _flush_to_tts 用它兜底):
-        deep-research / monitor / 主 agent 回复 / 秒回 的 TTS 都受它节制。
-
-        ★ 语义 = 喇叭开(_mm_tts_on) OR 对话模式开(_mm_voice_dialog_on):
-          - 喇叭单独开 → 照播 (与对话无关, 对齐"喇叭=自动播报"心智)。
-          - 对话模式开 → 后台强制 TTS 生效, 哪怕前端喇叭按钮显示"关"。
-            (用户方案: 对话开时 UI 麦/喇叭按钮态不变, 但后台联动。)
-        """
+        """Return whether automatic spoken output is enabled."""
         try:
-            s = self._session
-            return bool(s.get("_mm_tts_on") or s.get("_mm_voice_dialog_on"))
+            return bool(self._session.get("_mm_tts_on"))
         except Exception:
             return False
 
@@ -370,6 +347,8 @@ class VoiceAgent:
         drop_reason = self._layer2_filter(text)
         if drop_reason:
             log.info("[voice] L2 drop: %s | text=%r", drop_reason, text[:60])
+            # 用户说了话但被本地规则吞掉 —— 排查"我说了它没反应"的头号嫌疑。
+            vtrace("intent.l2_drop", sid=self._sid, reason=drop_reason, text=text)
             self._emit_progress("user_filtered", text=text, reason=drop_reason)
             return
 
@@ -460,6 +439,7 @@ class VoiceAgent:
 
         if not speak_to_me:
             log.info("[voice] EOU drop: not_addressed | text=%r", text[:60])
+            vtrace("intent.drop", sid=self._sid, reason="not_addressed", text=text)
             return
 
         # speak_to_me=true → 确认是跟我说的, 打断 TTS (只一次)
@@ -524,6 +504,7 @@ class VoiceAgent:
         self._eou_interrupted = False
         if not self._eou_buffer:
             return
+        _segs = len(self._eou_buffer)   # 链路日志用, 下一行就清空了
         full = " ".join(s for s in self._eou_buffer if s).strip()
         self._eou_buffer = []
         self._notify_buffer_updated()   # buffer 清空, 通知前端
@@ -533,6 +514,10 @@ class VoiceAgent:
         self._last_user_ts = time.time()
         self._user_utterance_seq += 1   # ★ 过期校验(方案B): 整句才 +1
         log.info("[voice] EOU flush: %r → is_interactive=%s", full[:80], self.is_interactive())
+        # ★ 环节1 出口: ASR 的整句 transcript。partial / 逐段 final / EOU 累积
+        #   都是中间过程, 不记 —— 这一句才是驱动下游所有 LLM 决策的输入。
+        vtrace("asr", sid=self._sid, segs=_segs, seq=self._user_utterance_seq,
+               interactive=self.is_interactive(), text=full)
         if self.is_interactive():
             # 对话模式: 进 VoiceAgent 分诊
             if self._loop is not None:
@@ -578,6 +563,9 @@ class VoiceAgent:
             self._scheduled_by_seq.clear()
             if drained:
                 log.info("[voice] user interrupt: dropped %d queued items", drained)
+            # 打断即使 drained=0 也要记: "用户开口了但队列本来就空"和"没触发打断"
+            # 是两种完全不同的故障, 日志里必须能分开。
+            vtrace("tts.interrupt", sid=self._sid, drained=drained)
         try:
             loop.call_soon_threadsafe(_clear_q)
         except Exception:
@@ -607,13 +595,15 @@ class VoiceAgent:
 
         快速回复（decide_route → route=self）已移除：LLM 超时/不稳定时会产出
         低质量兜底（如"让Wall-E去办"），体验不可控。现在统一由主 Agent 处理
-        所有用户话（含问候），回复质量由主 Agent + decide_speak + phrase_utterance
-        三层保证。
+        所有用户话（含问候）统一由主 Agent 处理。
         """
         if not self.is_interactive():
             log.debug("[voice._route_user] session no longer interactive, skip")
             return
         log.info("[voice._route_user] → main_agent (direct) text=%r", text[:80])
+        # ★ 环节3: 路由决策。这里不截断 —— 上面那行的 text[:80] 是给 agent.log
+        #   扫的, 链路日志要的是完整决策输入。
+        vtrace("route.user", sid=self._sid, route="main_agent", text=text)
         self._emit_progress(
             "route_decision", route="main_agent", local=False,
             fallback=False, user_text=text, answer="")
@@ -636,19 +626,13 @@ class VoiceAgent:
             log.warning("[voice] understand_q put failed: %s", exc)
 
     def submit(self, source: str, text: str, *, task_id: str = "") -> None:
-        """播报旁路入口: server.py 三处 hook (monitor/watcher/assistant) 直接调 submit(...).
-        转发到 submit_output 走决策层。"""
+        """播报旁路入口: server.py 的 monitor/watcher/assistant hooks 调用。"""
         # hook 用 "assistant" 表示主 Agent 回复; 内部规范化为 main_agent_reply.
         src = "main_agent_reply" if source == "assistant" else source
         self.submit_output(src, text, task_id=task_id)
 
     def submit_output(self, source: str, text: str, *, task_id: str = "") -> None:
-        """输出侧 hook 入口 (monitor / watcher / main_agent_reply 都走这里).
-
-        流程: 拉快照 → decide_speak → speak=True 按 priority 入回播队列; speak=False 静默.
-        LLM 失败/无 client → 兜底: 按 source 默认优先级直接入队 (原文).
-        用户作业结果 (user_task_result) 由理解 worker 直接入队, 不走决策层 (最高优先必须播).
-        """
+        """输出侧 hook 入口；喇叭开时直接入回播队列。"""
         text = (text or "").strip()
         if not text:
             return
@@ -666,75 +650,11 @@ class VoiceAgent:
             log.debug("[voice] submit_output failed: %s", exc)
 
     async def _route_output(self, source: str, text: str, task_id: str) -> None:
-        """输出侧走决策层: 拉快照 → decide_speak → 按 speak 决定入不入队 (入队的是原始
-        text, 措辞交给交互 worker 的 phrase_utterance 改造)��
-
-        ★ 门控层级 (对齐用户心智模型):
-          1. 喇叭 OFF (_mm_tts_on=False) → 立即丢弃 (播报总开关)
-          2. 用户作业结果 (user_task_result) → 最高优先必播
-          3. 对话模式 OFF → 朴素放行 (v1 行为: 直接入队, 走默认优先级, 交互 worker
-             会做拟词; 不调 decide_speak, 避免"我没开对话怎么还去 LLM 判"的浪费)
-          4. 对话模式 ON → 走决策层 (decide_speak 只判是否该说, 不产出措辞)
-        """
-        # ── Gate 1: 喇叭关 → 直接静默 (输出侧总闸) ──
+        """Queue output whenever the independent speaker switch is on."""
         if not self.is_speaker_on():
             log.debug("[voice._route_output] speaker OFF, drop source=%s", source)
             return
-        # ── Gate 2: 用户作业结果最高优先, 不走决策 (必播) ──
-        if source == "user_task_result":
-            self._enqueue_speak(source, text, PRI_USER_TASK_RESULT, task_id)
-            return
-        # ── Gate 3: 对话模式关 → 朴素放行 (v1 行为兼容) ──
-        #   深研/monitor/主 agent 回复喇叭开着就播, 不走 LLM 决策层。
-        if not self.is_interactive():
-            self._enqueue_speak(source, text, _default_priority(source), task_id)
-            return
-        # ── Gate 4: 对话模式开 → 走决策层 (拟词/防重复) ──
-        # 决策层判"是否重复"需要看更远的历史 (self_recent_n=8, 拟词层只看 2 条防措辞重复).
-        # A/B 实测: n=2 时 LLM 判不出语义重复; n≥5 时能准确识别 "此内容之前已说过".
-        snap = build_world_snapshot(
-            session=self._session,
-            trigger={"kind": source, "text": text, "task_id": task_id},
-            self_recent=self._recent_all(),
-            last_spoke_ts=self._last_spoke_ts,
-            convo_turns=self._settings.get("voice_interact_ctx_convo_turns", 6),
-            convo_max_chars=self._settings.get("voice_interact_ctx_convo_max_chars", 1200),
-            self_recent_n=self._settings.get("voice_decide_recent_n", 8),
-            qa_dialogue=self._qa_dialogue,
-            qa_turns=self._settings.get("voice_qa_dialogue_turns", 6),
-        )
-        decision = await decide_speak(
-            client=self._aux_client, model=self._aux_model, snapshot=snap,
-            timeout_sec=float(self._settings.get("voice_interact_llm_timeout_sec", 6.0)),
-        )
-        # 重复检查 speaker 状态 (LLM 期间用户可能关了喇叭)
-        if not self.is_speaker_on():
-            return
-        if decision is None:
-            # LLM 失败 → 兜底走 source 默认优先级 + 原文 (交互 worker 会做拟词)
-            log.debug("[voice._route_output] decide_speak fallback source=%s", source)
-            self._enqueue_speak(source, text, _default_priority(source), task_id)
-            return
-        if not decision.speak:
-            log.info("[voice._route_output] SILENCE source=%s reason=%s",
-                     source, decision.reason[:60])
-            return
-        # min_gap 门控: 刚说完没多久 + 本条是背景告知 (monitor/watcher/主Agent回复) →
-        #   缓一缓别打扰。用户直问/作业结果不受此门 (它们本就是用户要立刻听的)。
-        #   注: 到这里的 source 都是输出侧 hook (见下 _default_priority 一律 ambient),
-        #   所以直接按 silence 抑制即可; priority 已删 (播放优先级固定三级)。
-        min_gap = float(self._settings.get("voice_decide_min_gap_sec", 3.0))
-        silence = snap.silence_sec
-        if silence < min_gap:
-            log.info("[voice._route_output] SUPPRESS by min_gap: silence=%.1fs source=%s",
-                     silence, source)
-            return
-        # ★ decide_speak 只判"说不说", 不产出措辞。入队的是**原始 text**, 由交互 worker
-        #   的 phrase_utterance 独家改造成口播 (避免 decide/phrase 两次改写)。
-        # 优先级固定三级: 输出侧 hook (monitor/watcher/main_agent_reply) 一律 L3 ambient
-        #   (它们是背景告知, 不该抢过用户作业结果)。
-        pri = _default_priority(source)
-        self._enqueue_speak(source, text, pri, task_id)
+        self._enqueue_speak(source, text, _default_priority(source), task_id)
 
     def _enqueue_speak(self, source: str, text: str, priority: int, task_id: str,
                        *, skip_phrase: bool = False,
@@ -789,6 +709,11 @@ class VoiceAgent:
             self._speak_q.put_nowait((-item.priority, item.seq, item))
             # 登记占位 (决策层 recent_all() 会读)
             self._scheduled_by_seq[item.seq] = text
+            # ★ 环节5 入队: text 此时还是原文, 拟词发生在 _interact_worker 里。
+            #   qsize 是排查"为什么播报延迟"的第一现场。
+            vtrace("speak.enqueue", sid=self._sid, source=source, pri=priority,
+                   seq=item.seq, task_id=task_id or None,
+                   qsize=self._speak_q.qsize(), text=text)
         except Exception as exc:
             log.warning("[voice] speak_q put failed: %s", exc)
 
@@ -832,10 +757,14 @@ class VoiceAgent:
         if src == "monitor" and drift >= 1:
             log.info("[voice] ambient drop STALE monitor drift=%d text=%r",
                      drift, item.text[:60])
+            vtrace("speak.drop", sid=self._sid, reason="stale",
+                   source=src, drift=drift, text=item.text)
             return True
         if src in ("watcher", "watcher_report") and drift >= 2:
             log.info("[voice] ambient drop STALE watcher drift=%d text=%r",
                      drift, item.text[:60])
+            vtrace("speak.drop", sid=self._sid, reason="stale",
+                   source=src, drift=drift, text=item.text)
             return True
         # 精确同质化 (归一化后完全一致) 直接丢。近似相似依赖拟词层判断。
         norm = self._dedup_norm(item.text)
@@ -843,6 +772,8 @@ class VoiceAgent:
             for prev in self._self_recent[-6:]:
                 if self._dedup_norm(prev) == norm:
                     log.info("[voice] ambient drop DUPLICATE %s text=%r", src, item.text[:60])
+                    vtrace("speak.drop", sid=self._sid, reason="duplicate",
+                           source=src, text=item.text)
                     return True
         return False
 
@@ -866,8 +797,7 @@ class VoiceAgent:
           _voice_active_seq 单值精确配对保证 (抢门后主 Agent 仍串行执行一个 turn,
           回传按精确 seq 而非 FIFO pop(0))。并发的只是"等待", 主 Agent 执行本身串行。
 
-        ★ 纯 FIFO, 不丢旧委派: 后一句不一定取代前一句 (可能补充/不同话题)。所有委派
-          都执行; "结果回来该不该念"由过期校验 (方案B → decide_speak) 决定。
+        ★ 纯 FIFO, 不丢旧委派: 后一句不一定取代前一句。
         """
         log.info("[voice] understand worker started (sid=%s)", self._sid)
         try:
@@ -922,10 +852,7 @@ class VoiceAgent:
                 result = "任务处理出错了"
             finally:
                 self._pending_main_tasks.pop(task.seq, None)
-            # 结果回来 → 过期校验 (方案B):
-            #   委派后用户没再开口 (计数没变) → 必播 (零成本, 最常见路径);
-            #   期间用户又说了话 (计数变了, 可能改问题/取消/转移话题) → 过 decide_speak
-            #   判该不该念, speak=False 就丢弃 (结果已过期)。
+            # 结果回来后只尊重显式 speak=False 的内部控制信号。
             result_text = (result or "").strip() or "任务完成"
             if not should_speak:
                 log.info(
@@ -945,66 +872,11 @@ class VoiceAgent:
     async def _speak_task_result_with_expiry_check(
         self, task: UserTask, result_text: str
     ) -> None:
-        """委派结果入队前的过期校验 (方案B).
-
-        用"用户开口计数" (_user_utterance_seq) 当过期戳:
-          - 委派后用户没再开口 (计数 == 发起时快照) → 结果仍适用, 照常必播 (零成本);
-          - 计数变了 (期间用户又说了话, 可能改问题/取消/转移话题) → 过 decide_speak
-            判该不该念: speak=False → 丢弃 (log EXPIRED); speak=True → 入队。
-        decide_speak 失败 (None) → 兜底照常播 (宁可多说, 别因判官挂了吞掉用户要的结果)。
-        """
+        """Queue a delegated result without an LLM speak/silence decision."""
         task_id = f"utask_{task.seq}"
-        cur_seq = self._user_utterance_seq
-        # 常见路径: 委派后用户没再开口 → 必播, 不走 LLM。
-        if task.user_seq_at_submit == cur_seq:
-            self._enqueue_speak("user_task_result", result_text,
-                                PRI_USER_TASK_RESULT, task_id=task_id,
-                                origin_query=task.user_text,
-                                user_seq_at_submit=task.user_seq_at_submit)
-            return
-        # 用户期间又开口了 → 可能已改问题/取消。让 decide_speak 对比"发起时的问题" vs
-        #   "委派后的新对话" 判该不该念。新对话已在快照的 recent_dialogue/voice_qa_dialogue 里。
-        log.info("[voice] task_result expiry-check seq=%d submit_useq=%d cur_useq=%d "
-                 "orig_q=%r", task.seq, task.user_seq_at_submit, cur_seq,
-                 task.user_text[:60])
-        snap = build_world_snapshot(
-            session=self._session,
-            trigger={
-                "kind": "user_task_result",
-                "text": result_text,
-                "task_id": task_id,
-                "original_query": task.user_text,   # 供判官对比: 这条结果回应的老问题
-                "expiry_check": True,               # 提示判官: 委派后用户已再开口
-            },
-            self_recent=self._recent_all(),
-            last_spoke_ts=self._last_spoke_ts,
-            convo_turns=self._settings.get("voice_interact_ctx_convo_turns", 6),
-            convo_max_chars=self._settings.get("voice_interact_ctx_convo_max_chars", 1200),
-            self_recent_n=self._settings.get("voice_decide_recent_n", 8),
-            qa_dialogue=self._qa_dialogue,
-            qa_turns=self._settings.get("voice_qa_dialogue_turns", 6),
-        )
-        decision = await decide_speak(
-            client=self._aux_client, model=self._aux_model, snapshot=snap,
-            timeout_sec=float(self._settings.get("voice_interact_llm_timeout_sec", 6.0)),
-        )
-        # LLM 期间用户可能关了喇叭 (沿用 post-await re-check)。
         if not self.is_speaker_on():
-            log.info("[voice] task_result dropped: speaker off after check seq=%d", task.seq)
+            log.info("[voice] task_result dropped: speaker off seq=%d", task.seq)
             return
-        if decision is None:
-            # 判官挂了 → 兜底照常播 (宁可多说, 别吞掉用户要的结果)。
-            log.info("[voice] task_result expiry-check fallback(必播) seq=%d", task.seq)
-            self._enqueue_speak("user_task_result", result_text,
-                                PRI_USER_TASK_RESULT, task_id=task_id,
-                                origin_query=task.user_text,
-                                user_seq_at_submit=task.user_seq_at_submit)
-            return
-        if not decision.speak:
-            log.info("[voice] task_result EXPIRED, dropped seq=%d reason=%s",
-                     task.seq, (decision.reason or "")[:80])
-            return
-        # 判官认为仍该念 → 入队。
         self._enqueue_speak("user_task_result", result_text,
                             PRI_USER_TASK_RESULT, task_id=task_id,
                             origin_query=task.user_text,
@@ -1164,6 +1036,8 @@ class VoiceAgent:
         """
         if not self.is_speaker_on():
             log.debug("[voice._flush_to_tts] speaker OFF, drop source=%s", source)
+            vtrace("tts.drop", sid=self._sid, reason="speaker_off",
+                   source=source, text=spoken)
             return
         import secrets as _sec
         rid = "voice_" + source + "_" + _sec.token_hex(3)
@@ -1173,8 +1047,14 @@ class VoiceAgent:
         try:
             self._engine.enqueue_tts(spoken, rid)
             self._engine.finish_tts(rid)
+            # ★ 环节5 唯一出口: spoken 是拟词之后、真正要播的文本。链路的终点。
+            vtrace("tts.flush", sid=self._sid, rid=rid, source=source,
+                   qsize=(self._speak_q.qsize() if self._speak_q is not None else 0),
+                   text=spoken)
         except Exception as exc:
             log.warning("[voice] enqueue_tts failed: %s", exc)
+            vtrace("tts.drop", sid=self._sid, reason="enqueue_failed",
+                   source=source, err=str(exc), text=spoken)
             return
         # 占用估计: 让"播放中"覆盖大致语音时长
         _SEC_PER_CHAR = 0.18

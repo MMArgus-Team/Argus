@@ -439,6 +439,18 @@ class _SlashWorker:
 
 
 def _load_busy_input_mode() -> str:
+    """Policy for a TYPED prompt that arrives while a turn is running.
+
+    ``display.busy_input_mode`` owns this decision — the config file, not the
+    code, decides whether typing interrupts. Default stays ``interrupt`` for
+    parity with cli.py.
+
+    Note this governs the typed path only. A voice utterance is never allowed to
+    interrupt regardless of this setting: speech cannot be unsaid, two
+    utterances are two separate requests, and aborting the first turn to run the
+    second loses an answer the user already asked for. See _submit_main, which
+    passes queue_only unconditionally.
+    """
     display = _load_cfg().get("display")
     if not isinstance(display, dict):
         display = {}
@@ -1583,6 +1595,20 @@ def _record_mm_trajectory(event: str, sid: str, payload: dict | None) -> dict:
                 if _trajectory_image_chars(stored_entry) > 0:
                     _bound_mm_trajectory_images(rows)
     return entry
+
+
+def _vtrace(stage: str, **fields) -> None:
+    """对话模式语音链路专用日志 → ``~/.argus/logs/voice_chain.log``。
+
+    实现见 ``agent/multimodal/voice_trace.py``；默认关闭，``ARGUS_TRACE=1`` 或
+    config ``logging.voice_trace: true`` 打开。lazy import：gateway 启动路径不为
+    一条默认关闭的日志付 import 代价。永不抛异常。
+    """
+    try:
+        from agent.multimodal.voice_trace import vtrace
+        vtrace(stage, **fields)
+    except Exception:
+        pass
 
 
 def _emit(event: str, sid: str, payload: dict | None = None):
@@ -6772,6 +6798,32 @@ def _resolve_voice_task(session: dict, task_seq: Any, text: str) -> None:
         logger.debug("voice task resolution failed seq=%s: %s", task_seq, exc)
 
 
+def _claim_composer_attachments(session: dict, *, user_originated: bool) -> list:
+    """Take the images staged in the composer, but only for their owner.
+
+    Only a prompt the human actually sent owns those attachments. Handing them
+    to anything else both exposes the images to an unrelated prompt and makes
+    the user's next real submit silently lose them.
+
+    ★ Stated as a positive requirement, not as a list of exemptions. This used
+      to read ``if internal_origin: images = []``, which spared only the two
+      hidden hooks that happened to set that flag — every other machine-injected
+      prompt (async-delegation completions, background process notifications,
+      watch-pattern matches, goal follow-ups) still swallowed the composer's
+      attachments, and each new injected kind would have had to remember to opt
+      out. Keying on ``user_originated`` makes the safe answer the default: that
+      parameter already defaults to False, so anything injected is covered for
+      free.
+
+    Callers must hold ``session["history_lock"]``.
+    """
+    if not user_originated:
+        return []
+    images = list(session.get("attached_images", []))
+    session["attached_images"] = []
+    return images
+
+
 def _enqueue_prompt(
     session: dict,
     text: Any,
@@ -6960,6 +7012,18 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         if queued.get("transport") is not None:
             session["transport"] = queued["transport"]
     try:
+        # A queued voice utterance deliberately withheld its user bubble at
+        # submit time so the transcript never showed `user, user` (see
+        # _submit_main). Its turn starts now, so paint it now — same event and
+        # same request id, so the answer stream still correlates.
+        if queued_origin == "voice_agent" and str(queued.get("text") or "").strip():
+            _voice_turn_id = str(queued.get("voice_turn_id") or "")
+            _emit("multimodal.asr_final",
+                  str(queued.get("voice_live_sid") or sid), {
+                      "text": queued.get("text"),
+                      "request_id": str(queued.get("client_request_id") or ""),
+                      **({"turn_id": _voice_turn_id} if _voice_turn_id else {}),
+                  })
         _emit("multimodal.trajectory", sid, {
             "worker": "MainScheduler", "phase": "prompt_dequeued",
             "origin": queued_origin,
@@ -10412,7 +10476,18 @@ def _(rid, params: dict) -> dict:
     if (t := current_transport()) is not None:
         session["transport"] = t
     with session["history_lock"]:
-        if session.get("running"):
+        # ★ `or queued_prompts` closes the ordering hole at the turn boundary.
+        #   The turn tail sets running=False under this lock and only re-acquires
+        #   it afterwards to drain (see _run_prompt_submit's finally/_drain
+        #   pair), so a submit landing in between used to find running=False and
+        #   start immediately — overtaking messages that had been waiting in the
+        #   FIFO. Refusing the direct path while anything is queued makes
+        #   "sent means it waits its turn" hold for the whole queue.
+        #   queue_only is forced in that case: there is no live turn to
+        #   interrupt, and calling agent.interrupt() here would arm an interrupt
+        #   against the NEXT turn instead.
+        _queue_backlog = bool(session.get("queued_prompts"))
+        if session.get("running") or _queue_backlog:
             # Don't reject a mid-turn prompt — queue it (and, by default,
             # interrupt the live turn) so it runs as the next turn. See
             # _handle_busy_submit for why the old "session busy" rejection
@@ -10427,7 +10502,10 @@ def _(rid, params: dict) -> dict:
                 # Multimodal's composer intentionally accepts more questions
                 # while the foreground turn is streaming. Those submits must
                 # wait in FIFO without aborting a direct answer already in flight.
-                queue_only=bool(params.get("queue_if_busy", False)),
+                queue_only=(
+                    bool(params.get("queue_if_busy", False))
+                    or not session.get("running")
+                ),
                 metadata={
                     "client_request_id": client_request_id,
                 },
@@ -10901,10 +10979,9 @@ def _maybe_start_monitor_engine(sid: str, session: dict, frame_buffer):
             live = (getattr(agent, "mm_monitors", None) or {}).get(mid)
             if live is not None:
                 live["last_speak_ts"] = time.time()
-            # ★ TTS 播报旁路: 喇叭开 OR 对话模式开 → monitor 气泡完成交 announcer。
+            # TTS 播报旁路: 喇叭开时把 monitor 气泡交给 announcer。
             try:
-                if bool(session.get("_mm_tts_on")
-                        or session.get("_mm_voice_dialog_on")):
+                if bool(session.get("_mm_tts_on")):
                     _ann = _get_voice_agent(session)
                     if _ann is not None:
                         _ann.submit("monitor", text, task_id=str(mid))
@@ -11145,8 +11222,7 @@ def _maybe_start_live_watcher_agent(sid, frame_buffer, memory_backend, session=N
             #   watcher.final(最终报告)播, 导致"边看边给的实时战术分析"从不出声。announcer
             #   自带拥塞控制 (watcher 优先级 2, 播不过来会丢/加速), 不会把队列冲爆。
             try:
-                if bool(session.get("_mm_tts_on")
-                        or session.get("_mm_voice_dialog_on")):
+                if bool(session.get("_mm_tts_on")):
                     _ann = _get_voice_agent(session)
                     if _ann is not None:
                         _ann.submit("watcher", text, task_id=str(request_id))
@@ -11189,8 +11265,7 @@ def _maybe_start_live_watcher_agent(sid, frame_buffer, memory_backend, session=N
                                     watcher_id=str(request_id),
                                     text=final_text,
                                 )
-                    if bool(session.get("_mm_tts_on")
-                            or session.get("_mm_voice_dialog_on")):
+                    if bool(session.get("_mm_tts_on")):
                         announcer = _get_voice_agent(session)
                         if announcer is not None:
                             announcer.submit(
@@ -11368,8 +11443,7 @@ def _maybe_start_live_watcher_agent(sid, frame_buffer, memory_backend, session=N
                     status=str(status or "complete"),
                 )
             try:
-                if bool(session.get("_mm_tts_on")
-                        or session.get("_mm_voice_dialog_on")):
+                if bool(session.get("_mm_tts_on")):
                     announcer = _get_voice_agent(session)
                     if announcer is not None:
                         announcer.submit("assistant", answer, task_id=str(task_id))
@@ -12553,15 +12627,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any,
     with session["history_lock"]:
         persisted_history = list(session["history"])
         history_version = int(session.get("history_version", 0))
-        # A hidden Monitor/Watcher hook is not the owner of attachments the
-        # user staged in the composer.  Consuming them here would both expose
-        # those images to an unrelated internal prompt and make the user's next
-        # real submit silently lose them.
-        if internal_origin:
-            images = []
-        else:
-            images = list(session.get("attached_images", []))
-            session["attached_images"] = []
+        images = _claim_composer_attachments(
+            session, user_originated=user_originated)
         if not isinstance(session.get("inflight_turn"), dict):
             # Internal completion hooks may produce a visible Assistant answer,
             # but their implementation prompt must never reappear as a recovered
@@ -13178,14 +13245,9 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any,
             # Best-effort: TTS failure must NEVER break the chat turn.
             try:
                 session.pop("_mm_voice_turn", False)   # 清残留标记 (旧逻辑已停用)
-                # ★ 新: 独立 TTS 播报旁路。开关开启时, 主 Agent turn 完成的整段答案
-                #   交给 VoiceAgent (改写层口语化 → 播报), 不入 history、不逐段。
-                # ★ 有效播报态 = 喇叭开(_mm_tts_on) OR 对话模式开(_mm_voice_dialog_on):
-                #   对话模式下前端不再置 _mm_tts_on (改由后端 is_speaker_on OR 对话态),
-                #   所以这里也必须 OR 上对话态 —— 否则对话模式下 notify_main_reply 永不触发,
-                #   委派主 Agent 的作业 Future 永不 resolve → 300s 后必"任务处理超时了"。
-                _tts_effective = bool(session.get("_mm_tts_on")
-                                      or session.get("_mm_voice_dialog_on"))
+                # 独立 TTS 播报旁路。开关开启时，主 Agent turn 完成的
+                # 整段答案交给口播子系统改写后播报，不入 history、不逐段。
+                _tts_effective = bool(session.get("_mm_tts_on"))
                 _final = raw.strip() if isinstance(raw, str) else ""
                 # Correlation with a VoiceAgent-delegated task is independent
                 # from whether the user currently has the speaker/TTS switch on.
@@ -14570,11 +14632,9 @@ def _abort_active_asr_turn(
 def _(rid, params: dict) -> dict:
     """Open a streaming ASR session.
 
-    Modern Desktop callers pass ``{session_id, turn_id, mode}``, where mode is
-    ``manual_turn`` (push once to record, push again to finish one user turn) or
-    ``continuous`` (Voice Dialog's existing VAD-driven behavior).  ``turn_id``
-    is the ownership token for every subsequent audio/stop RPC.  Legacy callers
-    without a mode remain continuous for protocol compatibility.
+    Modern callers pass ``{session_id, turn_id, mode}``, where ``manual_turn``
+    buffers until an explicit finish and ``continuous`` submits each VAD final.
+    ``turn_id`` is the ownership token for every subsequent audio/stop RPC.
     """
     # Voice-only Desktop sessions start life as ordinary ``source=tui``
     # runtimes. Promote on demand before looking up the watcher/ASR engine;
@@ -14591,15 +14651,6 @@ def _(rid, params: dict) -> dict:
     modern = bool(requested_mode or raw_turn_id)
     mode = requested_mode or "continuous"
     explicit_manual = requested_mode == "manual_turn"
-    explicit_continuous = requested_mode == "continuous"
-    if session.get("_mm_voice_dialog_on") and not explicit_manual:
-        # Voice Dialog is deliberately VAD-driven and multi-turn.  Never let a
-        # legacy/unspecified start downgrade its established semantics.  A
-        # modern explicit manual_turn is authoritative, however: after a WS
-        # disconnect the renderer's dialog-off RPC may never have arrived, and
-        # forcing that stale flag here would make an ordinary push-to-talk mic
-        # unexpectedly auto-submit at every VAD pause.
-        mode = "continuous"
     if len(raw_turn_id) > 128:
         return _err(rid, 4004, "turn_id exceeds 128 characters")
     supplied_turn_id = raw_turn_id
@@ -14676,14 +14727,6 @@ def _(rid, params: dict) -> dict:
                             "mode": str(active_turn.get("mode") or mode),
                         })
                 active_mode = str(active_turn.get("mode") or mode)
-                if explicit_manual and active_mode == "manual_turn":
-                    session["_mm_voice_dialog_on"] = False
-                elif explicit_continuous and active_mode == "continuous":
-                    # The explicit rearm RPC is authoritative.  Commit the
-                    # dialog flag in the same capture-lock section as the
-                    # idempotent active-turn response so the first VAD final
-                    # cannot observe the old/off mode.
-                    session["_mm_voice_dialog_on"] = True
                 return _ok(rid, {
                     "enabled": True,
                     "turn_id": turn_id,
@@ -14759,7 +14802,12 @@ def _(rid, params: dict) -> dict:
                             and turn.get("audio_delivery_failed"))
                     )
                     if not cancelled:
-                        if session.get("running"):
+                        # Voice never interrupts and never overtakes: enqueue
+                        # while a turn runs OR while anything is still waiting.
+                        # Same invariant as _submit_main — see the comment there
+                        # for the turn-boundary window this closes.
+                        if (session.get("running")
+                                or session.get("queued_prompts")):
                             queued_position = _enqueue_prompt(
                                 session,
                                 text,
@@ -14863,15 +14911,6 @@ def _(rid, params: dict) -> dict:
 
     turn["submit_cb"] = _dispatch_user_turn
 
-    def _on_voice_turn(text: str) -> None:
-        """单独开麦模式 flush → 走普通语音 turn 路径 (直接提交主 Agent)。
-        与 _on_final 的老路 (非对话模式) 等价, 但由 VoiceAgent EOU 触发时机控制。"""
-        _dispatch_user_turn(text)
-
-    # 注入 EOU callback 到 session，供 VoiceAgent 状态机回调。
-    session["_mm_eou_buffer_cb"] = _on_eou_buffer_updated
-    session["_mm_voice_turn_cb"] = _on_voice_turn
-
     def _on_final(text: str) -> None:
         text = (text or "").strip()
         if not text:
@@ -14908,61 +14947,13 @@ def _(rid, params: dict) -> dict:
                 "turn_id": turn_id,
             })
             return
-        # ★ VoiceAgent v2 交互模式: 【对话】按钮开启 (_mm_voice_dialog_on=True) →
-        #   ASR final 不再直接走 _run_prompt_submit, 而是进 VoiceAgent v2 主线程做分诊
-        #   (self 直答 / main_agent 委派). v2 决定的作业才提交主 Agent.
-        #   麦/喇叭按钮只管传统 ASR 识别 + TTS 播报, 与 v2 交互模式独立.
-        voice = session.get("_mm_voice_agent")
-        if voice is not None:
-            try:
-                # ★ 所有 ASR final 都进 VoiceAgent EOU 状态机:
-                #   对话模式 (is_interactive) → flush 后走 _route_user (VoiceAgent 分诊)
-                #   单独开麦 (非对话)        → flush 后走 _mm_voice_turn_cb (主 Agent turn)
-                # 两种模式都靠 submit_user → _admit_user_with_intent_check 统一处理
-                # EOU 拼接/监听中/超时逻辑。flush 时 is_interactive() 区分后续行为。
-                if voice.is_interactive():
-                    # 对话模式: 不发带 text 的 asr_final 气泡 (快问快答不进主聊天区)。
-                    # 发 text="" 清信号让前端 partial 归位到 listening... 态。
-                    _emit("multimodal.asr_final", _sid, {
-                        "text": "",
-                        "request_id": _ensure_client_request_id(),
-                        "turn_id": turn_id,
-                    })
-                else:
-                    # 单独开麦: 只清理 partial; 完整 EOU 文字由
-                    # _on_voice_turn 仅发一次，并与实际主 Agent turn 共用 id。
-                    # 这避免原先“每段 ASR final 一个气泡 + EOU 再一个气泡”。
-                    _emit("multimodal.asr_final", _sid, {
-                        "text": "",
-                        "request_id": _ensure_client_request_id(),
-                        "turn_id": turn_id,
-                    })
-                voice.submit_user(text)
-                return
-            except Exception as exc:
-                logger.debug("voice submit_user failed, fallback to legacy: %s", exc)
         # Legacy continuous microphone semantics remain VAD-driven.  Modern
         # manual_turn returned above after buffering and reaches this helper
         # only from its explicit finish RPC.
         _dispatch_user_turn(text)
 
     def _on_speech_started() -> None:
-        # ★ Barge-in: DashScope VAD 一检测到用户开口 → 立即打断当前 TTS +
-        #   清 v2 回播队列, 不等 ASR final + 意图分类 (那要 2-3s, 用户会觉得"没打断")。
-        #   只对话模式生效: 非对话模式没有 v2 的 TTS 流可停; is_interactive() 内 try 兜住。
-        with turn["lock"]:
-            if (turn.get("state") != "recording"
-                    or turn.get("disposition") == "cancel"):
-                return
-        voice_ = session.get("_mm_voice_agent")
-        if voice_ is None:
-            return
-        try:
-            if not voice_.is_interactive():
-                return
-            voice_._interrupt_current_playback()
-        except Exception as exc:
-            logger.debug("voice barge-in failed: %s", exc)
+        return
 
     # Runtime build/promotion is deliberately outside capture_lock.  The
     # provisional turn above is the ownership token a concurrent exact-id stop
@@ -15060,15 +15051,6 @@ def _(rid, params: dict) -> dict:
         else:
             with turn["lock"]:
                 turn["state"] = "recording"
-            if explicit_manual:
-                # Commit an explicit mode only after the upstream session has
-                # opened successfully.  Keeping this under capture_lock makes
-                # the recording state and VoiceAgent routing mode one atomic
-                # observation for audio/final callbacks.
-                session["_mm_voice_dialog_on"] = False
-            elif explicit_continuous:
-                session["_mm_voice_dialog_on"] = True
-            # ★ 麦克风状态字段 (VoiceAgent v2 交互模式判定用: 麦+喇叭同开 → is_interactive=True).
             session["_mm_asr_on"] = True
 
     if cleanup_late_start:
@@ -15571,9 +15553,7 @@ def _get_voice_agent(session: dict):
         _cfg = _load_cfg() or {}
         voice_client, voice_model = None, ""
         try:
-            # ★ merge: 统一走 auxiliary.text 端点 (含 use_local + local_backend Qwen2.5-0.5B
-            #   + remote_backend deepseek 兜底)。judge_addressed/decide_route/
-            #   decide_speak/phrase_utterance 的【远端】部分都用这个 client;
+            # 统一走 auxiliary.text 端点，用于 phrase_utterance 口播改写；
             #   本地 Qwen2.5-0.5B 由 voice_intent_local 直接 transformers 推理, 不经此 client。
             from agent.auxiliary_client import get_async_text_auxiliary_client
             voice_client, voice_model = get_async_text_auxiliary_client(
@@ -15612,17 +15592,37 @@ def _get_voice_agent(session: dict):
                 return
             # VoiceAgent only calls this callback after routing the utterance to
             # the main agent.  Materialize the voice-tagged user bubble exactly
-            # once here, then carry its id through queued or immediate submit.
-            _emit("multimodal.asr_final", _live_sid, {
-                "text": text,
-                "request_id": client_request_id,
-                **({"turn_id": active_turn_id} if active_turn_id else {}),
-            })
+            # once, then carry its id through queued or immediate submit.
+            #
+            # ★ Emitted AFTER the busy gate below, never before it. Painting the
+            #   bubble here unconditionally meant a queued utterance appeared in
+            #   the transcript the moment it was recognized — while the previous
+            #   turn was still running — so two quick utterances rendered as
+            #   `user, user` with no assistant between them. History was always
+            #   correct (the FIFO is claimed under history_lock, exactly like a
+            #   typed prompt), but the visible transcript was not, and a
+            #   user/user pair is the shape providers reject. The typed path
+            #   shows a queue indicator instead of a bubble and only renders the
+            #   message when its turn starts; voice now matches. The queued
+            #   branch re-emits this event from _drain_queued_prompt.
+            def _emit_voice_bubble() -> None:
+                _emit("multimodal.asr_final", _live_sid, {
+                    "text": text,
+                    "request_id": client_request_id,
+                    **({"turn_id": active_turn_id} if active_turn_id else {}),
+                })
             with lock:
-                if session.get("running"):
+                # ★ `or queued_prompts` keeps speech in the order it was spoken.
+                #   The turn tail releases ``running`` under the lock and only
+                #   then re-acquires it to drain (see the finally/_drain pair at
+                #   the end of _run_prompt_submit), so a fresh utterance landing
+                #   in that window would find running=False and take the direct
+                #   path — jumping ahead of an older utterance still sitting in
+                #   the FIFO. Refusing the direct path whenever anything is
+                #   queued makes "second one waits its turn" hold for the whole
+                #   queue, not just the turn in flight.
+                if session.get("running") or session.get("queued_prompts"):
                     # 主 Agent 忙 → 委派进统一 queued_prompts FIFO, 逐个执行 (不丢)。
-                    # 是否"已过期该不该念"由结果回来时的过期校验 (方案B: _handle_user_task
-                    #   → decide_speak 语义判断) 决定, 不在入队时一刀切删旧委派。
                     position = _enqueue_prompt(
                         session,
                         text,
@@ -15632,6 +15632,10 @@ def _get_voice_agent(session: dict):
                         metadata={
                             "voice_task_seq": task_seq,
                             "client_request_id": client_request_id,
+                            # Carried so the drain can paint this utterance's
+                            # bubble when its turn actually begins.
+                            "voice_live_sid": _live_sid,
+                            "voice_turn_id": active_turn_id,
                         },
                     )
                     _emit("multimodal.trajectory", _live_sid, {
@@ -15640,9 +15644,17 @@ def _get_voice_agent(session: dict):
                         "text": text,
                         "client_request_id": client_request_id,
                     })
+                    _vtrace("route.main", sid=_live_sid, mode="fifo",
+                            seq=task_seq, rid=client_request_id,
+                            queue_pos=position, text=text)
                     return
                 session["running"] = True
                 session["_voice_active_seq"] = task_seq
+            # Gate won → this turn starts now, so the bubble is in order.
+            _emit_voice_bubble()
+            # ★ 环节3 终点: 交给主 Agent 之前的最后一刻。text 从这里进 LLM。
+            _vtrace("route.main", sid=_live_sid, mode="direct",
+                    seq=task_seq, rid=client_request_id, text=text)
             def _turn():
                 try:
                     # asr_final 已经渲染了唯一的语音用户气泡;
@@ -15712,36 +15724,6 @@ def _(rid, params: dict) -> dict:
     # v2 无 set_enabled: 通过 is_speaker_on() 读 _mm_tts_on 自动判断是否播报。
     # 这里只需确保实例已懒建 (hook 进来时才有播报旁路)。
     _get_voice_agent(session)
-    return _ok(rid, {"ok": True, "enabled": on})
-
-
-@method("multimodal.voice_dialog_toggle")
-def _(rid, params: dict) -> dict:
-    """独立【对话模式】开关 (与麦/喇叭按钮解耦).
-
-    params: {session_id, enabled}.
-    - enabled=True: ASR final 走 VoiceAgent 主线程分诊 (self 直答 / 委派主Agent),
-      带层2/层3防远场误识别、fast reply秒回、TTS打断.
-    - enabled=False: ASR final 走传统路径 (直接 _run_prompt_submit 提交主Agent).
-      麦/喇叭按钮独立控制识别+播报, 与本开关无关.
-    """
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    request_transport = current_transport()
-    session_transport = session.get("transport")
-    if (request_transport is not None and session_transport is not None
-            and request_transport is not session_transport):
-        return _ok(rid, {
-            "ok": False,
-            "enabled": bool(session.get("_mm_voice_dialog_on", False)),
-            "reason": "stale_transport",
-        })
-    on = bool(params.get("enabled"))
-    session["_mm_voice_dialog_on"] = on
-    # 若开启对话模式且实例未建, 触发懒建。
-    if on:
-        _get_voice_agent(session)
     return _ok(rid, {"ok": True, "enabled": on})
 
 

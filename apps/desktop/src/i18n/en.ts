@@ -2276,8 +2276,6 @@ export const en: Translations = {
       micLabel: 'Voice (streaming recognition)',
       ttsOnTitle: 'Speech: on (auto-read analysis) — click to disable',
       ttsOffTitle: 'Speech: off — click to enable',
-      dialogOnTitle: 'Dialog mode: on (natural voice interaction, smart triage + instant reply + interruptible) — click to disable',
-      dialogOffTitle: 'Dialog mode: off — click to enter voice dialog interaction (auto-opens mic)',
       dialogToastMicBlocked: 'In dialog mode, the microphone is controlled by dialog; please turn off dialog mode first to control it independently',
       dialogToastTtsBlocked: 'In dialog mode, speech is automatically enabled; please turn off dialog mode first to control it independently',
       finalizingRecognition: 'Finalizing recognition…',

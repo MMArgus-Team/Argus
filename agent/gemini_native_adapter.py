@@ -407,9 +407,7 @@ def build_gemini_request(
     messages: List[Dict[str, Any]],
     tools: Any = None,
     tool_choice: Any = None,
-    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
-    top_p: Optional[float] = None,
     stop: Any = None,
     thinking_config: Any = None,
 ) -> Dict[str, Any]:
@@ -426,9 +424,8 @@ def build_gemini_request(
     if tool_config:
         request["toolConfig"] = tool_config
 
+    # ★ Sampling params are never sent (see transports/chat_completions.py).
     generation_config: Dict[str, Any] = {}
-    if temperature is not None:
-        generation_config["temperature"] = temperature
     if max_tokens is not None:
         generation_config["maxOutputTokens"] = max_tokens
     else:
@@ -443,8 +440,6 @@ def build_gemini_request(
         # the field genuinely means full budget — that assumption does not
         # hold on the native API.
         generation_config["maxOutputTokens"] = GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
-    if top_p is not None:
-        generation_config["topP"] = top_p
     if stop:
         generation_config["stopSequences"] = stop if isinstance(stop, list) else [str(stop)]
     normalized_thinking = _normalize_thinking_config(thinking_config)
@@ -901,9 +896,7 @@ class GeminiNativeClient:
         stream: bool = False,
         tools: Any = None,
         tool_choice: Any = None,
-        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
         stop: Any = None,
         extra_body: Optional[Dict[str, Any]] = None,
         timeout: Any = None,
@@ -917,9 +910,7 @@ class GeminiNativeClient:
             messages=messages or [],
             tools=tools,
             tool_choice=tool_choice,
-            temperature=temperature,
             max_tokens=max_tokens,
-            top_p=top_p,
             stop=stop,
             thinking_config=thinking_config,
         )

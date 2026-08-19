@@ -94,7 +94,6 @@ async def rewrite_for_tts(client, model, text: str,
             {"role": "user", "content": merged},
         ],
         "max_tokens": 256,
-        "temperature": 1.0,
         "stream": False,
     }
     # ── 专用文件日志: 完整请求 JSON, 写到独立的 voice_rewrite.log (不混进 agent.log)。 ──
@@ -165,7 +164,6 @@ async def judge_speak(client, model, spoken: str, history: Optional[list] = None
             {"role": "user", "content": user},
         ],
         "max_tokens": 8,
-        "temperature": 0.0,
         "stream": False,
     }
     _ensure_io_handler()

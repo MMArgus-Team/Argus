@@ -898,8 +898,6 @@ export const zh: Translations = {
       startSpeaking: "点击开始说话（流式语音）",
       ttsOnTitle: "语音播报：开（主Agent/监控/深度分析气泡自动朗读）— 点击关闭",
       ttsOffTitle: "语音播报：关 — 点击开启自动朗读",
-      dialogOnTitle: "对话模式：开（语音自然交互，智能分诊+秒回+可打断）— 点击关闭",
-      dialogOffTitle: "对话模式：关 — 点击进入语音对话交互",
       playVoice: "播放语音",
       stopSpeaking: "停说",
     },

@@ -24,6 +24,83 @@ from typing import Any, List, Optional
 log = logging.getLogger("hermes.multimodal.voice_agent.ctx")
 
 
+def _model_is_kimi_k3(model: str) -> bool:
+    return "kimi-k3" in (model or "").replace(" ", "-").lower()
+
+
+def _log_voice_prompt(call: str, model: str, messages: List[dict],
+                      **fields: Any) -> None:
+    """把本次真正上线的 system / user 原文写进 voice_chain.log.
+
+    ``[VA_LLM] in=`` 记的是结构化 payload (世界快照 dict), 不是拼装后的 prompt,
+    而 system prompt 从来没被记过 —— 想核对"到底给模型看了什么"只能去读源码。
+    这里在唯一的出网口按角色 (decide_speak / decide_route / phrase / intent /
+    intent_eou) dump 一次, 不截断、不转义。默认关, 与 vtrace 同一个开关。
+    """
+    try:
+        from agent.multimodal.voice_trace import vtrace_prompt
+        system = "\n".join(
+            str(m.get("content") or "") for m in messages
+            if m.get("role") == "system")
+        user = "\n".join(
+            str(m.get("content") or "") for m in messages
+            if m.get("role") == "user")
+        vtrace_prompt(f"{call}.prompt", model=model, system=system,
+                      user=user, **fields)
+    except Exception:
+        pass
+
+
+async def _voice_chat(
+    *,
+    client: Any,
+    model: str,
+    messages: List[dict],
+    max_tokens: int,
+    temperature: float,
+    timeout_sec: float,
+    call: str = "voice",
+) -> Any:
+    """chat.completions.create for the voice roles — one attempt, no sampling params.
+
+    ``temperature`` is still accepted so the five call sites keep their intent
+    documented, but it is never sent: sampling params are dropped everywhere now
+    (see agent/transports/chat_completions.py build_kwargs). That removes the
+    reason this helper used to exist — a default→portable retry that reacted to
+    "invalid temperature: only 1 is allowed for this model" 400s. With nothing
+    to be rejected there is nothing to retry, so a single call is enough.
+
+    ``max_completion_tokens`` is kept for routes that only accept that spelling,
+    and widened well past voice's tiny ``max_tokens`` (50–200) because a
+    reasoning model's thinking tokens share the completion budget — at 200 the
+    reply comes back empty.
+
+    asyncio.TimeoutError propagates untouched to the caller's timeout fallback.
+    """
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "max_completion_tokens": max(int(max_tokens or 0), 8192),
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    # ★ Cap reasoning on the thinking routes or voice never gets an answer at
+    #   all. The budgets are brutal (intent/EOU 2s, decide/phrase 6s) because
+    #   they sit in front of a live conversation, while Kimi K3 at default
+    #   effort reasons until the gateway's own 60s deadline — the same override
+    #   _workers._post applies, whose smoke tests found min/medium run to that
+    #   deadline while "low returns usable JSON". Without it every call burns
+    #   its whole timeout and falls back (speak anyway / raw passthrough /
+    #   assume the sentence ended), silently disabling the decision layer.
+    if _model_is_kimi_k3(model):
+        kwargs["reasoning_effort"] = "low"
+    # Dumped before the wire so the log shows what the model was actually shown
+    # even when the call then fails.
+    _log_voice_prompt(call, model, messages, max_tokens=max_tokens)
+    return await asyncio.wait_for(
+        client.chat.completions.create(**kwargs), timeout=timeout_sec)
+
+
 # ══════════════════════════════════════════════════════════════════
 # 1. 世界快照 (context_provider, 四源)
 # ══════════════════════════════════════════════════════════════════
@@ -337,19 +414,14 @@ async def phrase_utterance(
     def _ms() -> float:
         return (time.monotonic() - _t0) * 1000.0
     try:
-        resp = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _PHRASE_UTTERANCE_SYSTEM},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=100,
-                temperature=0.6,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                stream=False,
-            ),
-            timeout=timeout_sec,
+        resp = await _voice_chat(
+            client=client, model=model,
+            messages=[
+                {"role": "system", "content": _PHRASE_UTTERANCE_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=100, temperature=0.6, timeout_sec=timeout_sec,
+            call="phrase",
         )
     except asyncio.TimeoutError:
         log.warning("[voice.phrase] timeout after %.1fs", timeout_sec)
@@ -401,19 +473,14 @@ async def decide_speak(
     def _ms() -> float:
         return (time.monotonic() - _t0) * 1000.0
     try:
-        resp = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _DECIDE_SPEAK_SYSTEM},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=200,
-                temperature=0.4,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                stream=False,
-            ),
-            timeout=timeout_sec,
+        resp = await _voice_chat(
+            client=client, model=model,
+            messages=[
+                {"role": "system", "content": _DECIDE_SPEAK_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=200, temperature=0.4, timeout_sec=timeout_sec,
+            call="decide_speak",
         )
     except asyncio.TimeoutError:
         log.warning("[voice.decide_speak] timeout after %.1fs", timeout_sec)
@@ -463,19 +530,14 @@ async def decide_route(
     def _ms() -> float:
         return (time.monotonic() - _t0) * 1000.0
     try:
-        resp = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _DECIDE_ROUTE_SYSTEM},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=200,
-                temperature=0.3,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                stream=False,
-            ),
-            timeout=timeout_sec,
+        resp = await _voice_chat(
+            client=client, model=model,
+            messages=[
+                {"role": "system", "content": _DECIDE_ROUTE_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=200, temperature=0.3, timeout_sec=timeout_sec,
+            call="decide_route",
         )
     except asyncio.TimeoutError:
         log.warning("[voice.decide_route] timeout after %.1fs", timeout_sec)
@@ -564,19 +626,13 @@ async def judge_addressed_to_me(
     def _ms() -> float:
         return (time.monotonic() - _t0) * 1000.0
     try:
-        resp = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _INTENT_ADDRESSED_SYSTEM},
-                    {"role": "user", "content": payload},
-                ],
-                max_tokens=50,
-                temperature=0.1,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                stream=False,
-            ),
-            timeout=timeout_sec,
+        resp = await _voice_chat(
+            client=client, model=model,
+            messages=[
+                {"role": "system", "content": _INTENT_ADDRESSED_SYSTEM},
+                {"role": "user", "content": payload},
+            ],
+            max_tokens=50, temperature=0.1, timeout_sec=timeout_sec, call="intent",
         )
     except asyncio.TimeoutError:
         log.warning("[voice.intent] timeout after %.1fs", timeout_sec)
@@ -666,20 +722,17 @@ async def judge_intent_eou_remote(
     payload = f"User utterance: {user_text}"
     if hint:
         payload += f"\nContext hint: {hint}"
+    # 日志要记"发给 LLM 决策前最后一刻"的东西 —— user_text/hint 是结构化镜像,
+    # payload 才是真正上线的 user 消息。两者都留: 前者好机器解析, 后者是真相。
+    _in = {**_in, "user_msg": payload}
     try:
-        resp = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _INTENT_EOU_SYSTEM},
-                    {"role": "user", "content": payload},
-                ],
-                max_tokens=50,
-                temperature=0.1,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                stream=False,
-            ),
-            timeout=timeout_sec,
+        resp = await _voice_chat(
+            client=client, model=model,
+            messages=[
+                {"role": "system", "content": _INTENT_EOU_SYSTEM},
+                {"role": "user", "content": payload},
+            ],
+            max_tokens=50, temperature=0.1, timeout_sec=timeout_sec, call="intent_eou",
         )
     except asyncio.TimeoutError:
         log.warning("[voice.intent_eou] remote timeout after %.1fs", timeout_sec)
@@ -738,6 +791,15 @@ def _va_llm_log(
             call, loc, 1 if ok else 0, ms,
             _j(payload_in), _j(out), _j(err or ""),
         )
+    except Exception:
+        pass
+    # 同一条记录再进语音链路专用文件 (~/.argus/logs/voice_chain.log), 让 ASR →
+    # 意图 → 路由 → 拟词 → 播报 能在一个 tail -f 里按时序对齐。默认关, 由
+    # ARGUS_TRACE=1 / config logging.voice_trace 打开。上面的 agent.log 行为不变。
+    try:
+        from agent.multimodal.voice_trace import vtrace
+        vtrace(f"{call}.llm", loc=loc, ok=ok, ms=round(ms),
+               **{"in": payload_in, "out": out, "err": err or None})
     except Exception:
         pass
 

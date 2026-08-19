@@ -302,3 +302,52 @@ describe("failed tool rows", () => {
   });
 });
 
+
+describe("buildRows invisible bubbles", () => {
+  // An assistant bubble can finish carrying nothing (no text, no reasoning) —
+  // e.g. the turn went straight from one tool call to the next. It renders as
+  // nothing on screen, but while it still emitted a chat row it broke bg
+  // adjacency, so the tool calls around it showed up as two separate 处理过程
+  // cards with no visible reason between them. Prose is a deliberate barrier;
+  // silence is not.
+  const emptyDone = (id: string) => ({ id, role: "assistant", text: "" }) as never;
+  const streamingEmpty = (id: string) =>
+    ({ id, role: "assistant", text: "", streaming: true }) as never;
+
+  it("does not split a segment on a finished empty assistant bubble", () => {
+    const rows = buildRows([
+      ask("u1", "看一下屏幕"),
+      tool("x1", "skill_view"),
+      emptyDone("m1"),
+      tool("x2", "set_live_watcher"),
+    ]);
+    const bg = rows.filter((r) => r.type === "bg");
+    expect(bg).toHaveLength(1);
+    expect(bg[0].type === "bg" && bg[0].items.map((i) => i.toolName)).toEqual([
+      "skill_view",
+      "set_live_watcher",
+    ]);
+    // The invisible bubble must not survive as a row either.
+    expect(rows.filter((r) => r.type === "chat")).toHaveLength(1);
+  });
+
+  it("still splits on real prose", () => {
+    const bg = buildRows([
+      ask("u1", "看一下屏幕"),
+      tool("x1", "skill_view"),
+      say("m1", "Deep research task created"),
+      tool("x2", "set_live_watcher"),
+    ]).filter((r) => r.type === "bg");
+    expect(bg).toHaveLength(2);
+  });
+
+  it("keeps a streaming empty bubble — it is the live thinking line", () => {
+    const rows = buildRows([
+      ask("u1", "看一下屏幕"),
+      tool("x1", "skill_view"),
+      streamingEmpty("m1"),
+      tool("x2", "set_live_watcher"),
+    ]);
+    expect(rows.some((r) => r.type === "chat" && (r as never as { msg: { id: string } }).msg.id === "m1")).toBe(true);
+  });
+});

@@ -1011,7 +1011,6 @@ class QwenVLOCRClient:
         kwargs = dict(
             model=self.model,
             messages=msgs,
-            temperature=0,
             max_tokens=max_tokens,
             timeout=timeout_sec,
         )
@@ -2496,7 +2495,6 @@ async def summarize_watch(client, model: str, *, request_id: str,
             },
         ],
         max_tokens=max_tokens,
-        temperature=0.3,
         stream=False,
         extra_body={"chat_template_kwargs": {"enable_thinking": True}},
     )
@@ -2793,13 +2791,16 @@ class OpenAIMemoryClient(MemoryLLMClient):
                 "messages": cur_messages,
                 "stream": False,
             }
+            # ★ No sampling params. temperature/top_p/top_k are no longer sent
+            #   anywhere (rationale in agent/transports/chat_completions.py's
+            #   build_kwargs); pinning them was the direct cause of hard 400s on
+            #   every gateway that manages sampling server-side.
+            #   chat_template_kwargs stays — enable_thinking is a routing switch,
+            #   not a sampling knob.
             default_kwargs = dict(
                 base_kwargs,
                 max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=0.8,
-                extra_body={"top_k": 20,
-                            "chat_template_kwargs": {"enable_thinking": False}},
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             portable_kwargs = dict(
                 base_kwargs,
@@ -3177,10 +3178,9 @@ class GeminiMemoryClient(MemoryLLMClient):
         # ★ 强制提到 65535 (见上面 docstring 解释): qwen3.5 关 thinking 用 2560 够,
         #   但 Gemini HIGH thinking 自己就吃 5-15k, 必须给上限.
         effective_max_tokens = max(max_tokens, self.MAX_OUTPUT_TOKENS)
+        # 采样参数一律不发 (见 transports/chat_completions.py build_kwargs)。
         gen_cfg: Dict[str, Any] = {
-            "temperature": temperature,
             "maxOutputTokens": effective_max_tokens,
-            "topP": 0.95,
             "thinkingConfig": {"thinkingLevel": self.THINKING_LEVEL,
                                "includeThoughts": False},
             "media_resolution": self.MEDIA_RESOLUTION,
@@ -4077,7 +4077,6 @@ class MemoryWriter:
         ]
         raw = await self._call_llm(
             msgs, max_tokens=self.cfg.writer_max_tokens,
-            temperature=self.cfg.writer_temperature,
             kind="memory_writer",
             extra={"n_frames": len(frames), "ask_ts_now": ask_ts_now},
         )
@@ -4968,7 +4967,6 @@ class MemoryWriter:
             raw = await self._call_llm(
                 msgs,
                 max_tokens=self.cfg.mem_aggregator_max_tokens,
-                temperature=self.cfg.mem_aggregator_temperature,
                 kind="aggregator_l2",
                 extra={"n_micros": len(micros), "n_frames": len(agg_frames)},
             )
@@ -5062,7 +5060,6 @@ class MemoryWriter:
             raw = await self._call_llm(
                 msgs,
                 max_tokens=self.cfg.mem_aggregator_max_tokens,
-                temperature=self.cfg.mem_aggregator_temperature,
                 kind="aggregator_l3",
                 extra={"n_macros": len(macros), "n_frames": len(agg_frames)},
             )
@@ -5642,7 +5639,6 @@ class MemoryReviewer:
         raw = await self._call_llm(
             msgs,
             max_tokens=self.cfg.reviewer_max_tokens,
-            temperature=self.cfg.reviewer_temperature,
             kind=self.ROLE_NAME,
             extra={"n_micros": len(recent_micros) + len(early_micros),
                    "n_frames": _count_image_parts(msgs),
@@ -6967,10 +6963,7 @@ class WatcherWorker:
                 model=self.cfg.model,
                 messages=messages,
                 max_tokens=512,
-                temperature=0.0,
-                top_p=0.8,
                 extra_body={
-                    "top_k": 20,
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
                 stream=False,
@@ -7172,11 +7165,9 @@ class WatcherWorker:
             resp = await self.client.chat.completions.create(
                 model=self.cfg.model, messages=msgs,
                 max_tokens=self.cfg.watcher_answer_max_tokens,
-                temperature=self.cfg.watcher_answer_temperature, top_p=0.8,
                 # WatcherWorker.answer 最终合成 —— 开推理让它把检索到的证据
                 # 和用户问题对齐再输出, 避免"证据够但答非所问"。
-                extra_body={"top_k": 20,
-                            "chat_template_kwargs": {"enable_thinking": enable_thinking}},
+                extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
                 stream=False,
             )
             raw = _msg_text(resp)
@@ -7583,10 +7574,8 @@ class WatcherWorker:
             create_kwargs = dict(
                 model=self.cfg.model, messages=msgs,
                 max_tokens=self.cfg.react_round_max_tokens,
-                temperature=self.cfg.react_temperature, top_p=0.8,
                 # ReAct 每步都在决策"看到证据后下一步做什么", 开推理换更少空转步。
-                extra_body={"top_k": 20,
-                            "chat_template_kwargs": {"enable_thinking": enable_thinking}},
+                extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
                 stream=True,
             )
             # Some OpenAI-compatible providers reject tools=[] or an orphaned
@@ -11000,10 +10989,7 @@ class RecallAgent:
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=0.8,
                 extra_body={
-                    "top_k": 20,
                     "chat_template_kwargs": {"enable_thinking": enable_thinking},
                 },
                 stream=False,
@@ -12202,7 +12188,6 @@ class RecallAgent:
             resp = await self._create_chat_completion(
                 msgs,
                 max_tokens=self.cfg.recall_max_tokens,
-                temperature=self.cfg.recall_temperature,
                 enable_thinking=False,
                 channel_tag=f"decide_r{round_idx}",
             )

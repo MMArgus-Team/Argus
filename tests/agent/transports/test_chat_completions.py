@@ -524,27 +524,6 @@ class TestChatCompletionsBuildKwargs:
         )
         assert kw["service_tier"] == "priority"
 
-    def test_fixed_temperature(self, transport):
-        """Fixed temperature is now set via ProviderProfile.fixed_temperature."""
-        from providers.base import ProviderProfile
-        msgs = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="gpt-4o", messages=msgs,
-            provider_profile=ProviderProfile(name="_t", fixed_temperature=0.6),
-        )
-        assert kw["temperature"] == 0.6
-
-    def test_omit_temperature(self, transport):
-        """Omit temperature is set via ProviderProfile with OMIT_TEMPERATURE sentinel."""
-        from providers.base import ProviderProfile, OMIT_TEMPERATURE
-        msgs = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="gpt-4o", messages=msgs,
-            provider_profile=ProviderProfile(name="_t", fixed_temperature=OMIT_TEMPERATURE),
-        )
-        assert "temperature" not in kw
-
-
 class TestChatCompletionsKimi:
     """Regression tests for the Kimi/Moonshot quirks migrated into the transport."""
 

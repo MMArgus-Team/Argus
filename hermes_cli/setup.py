@@ -661,7 +661,7 @@ def _print_setup_summary(config: dict, hermes_home):
     print()
     print(color("🚀 Ready to go!", Colors.CYAN, Colors.BOLD))
     print()
-    print(f"   {color('hermes', Colors.GREEN)}              Start chatting")
+    print(f"   {color('argus', Colors.GREEN)}               Start chatting")
     print(f"   {color('argus gateway', Colors.GREEN)}      Start messaging gateway")
     print(f"   {color('argus doctor', Colors.GREEN)}       Check for issues")
     print()

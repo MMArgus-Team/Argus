@@ -12,7 +12,24 @@ export interface TimelineEntry {
 }
 
 // Injected as user messages for alternation; not human prompts (thread.tsx).
+// Shapes come from tools/process_registry.py format_process_notification():
+//   "[IMPORTANT: Background process … Output:\n…]"   brackets wrap the message
+//   "[ASYNC DELEGATION BATCH COMPLETE — id]\n…"      bracket closes on line 1
+// The delegation header must NOT be anchored at the end: its bracket closes on
+// the first line and the report body continues below it, so the original
+// `\]$`-anchored pattern never matched and async-delegation completions
+// rendered as a full human user bubble.
 const PROCESS_NOTIFICATION_RE = /^\[IMPORTANT: Background process [\s\S]*\]$/
+const DELEGATION_NOTIFICATION_RE = /^\[ASYNC DELEGATION (?:BATCH )?COMPLETE\b/
+
+/** Whether this user-role message was injected by the runtime, not typed. */
+export function isInjectedNotification(text: string): boolean {
+  const trimmed = text.trim()
+  return (
+    PROCESS_NOTIFICATION_RE.test(trimmed)
+    || DELEGATION_NOTIFICATION_RE.test(trimmed)
+  )
+}
 
 const PREVIEW_MAX = 120
 
@@ -36,7 +53,7 @@ export function deriveTimelineEntries(messages: readonly TimelineSourceMessage[]
 
     const text = message.text.trim()
 
-    if (!text || PROCESS_NOTIFICATION_RE.test(text)) {
+    if (!text || isInjectedNotification(text)) {
       continue
     }
 
