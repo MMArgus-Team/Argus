@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <link rel="icon" type="image/png" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="shortcut icon" href="/apple-touch-icon.png" />
+    <title>Argus</title>
+    <script>
+      // Pre-paint the themed background before the app bundle loads. Without
+      // this, the first frame (which is what `ready-to-show` waits for) is the
+      // UA-default white page, and the real theme only lands once the whole
+      // module graph has executed — i.e. the "white flash" on every new
+      // window. applyTheme() in src/themes/context.tsx keeps these keys fresh.
+      try {
+        let bg = localStorage.getItem('argus-boot-background')
+        let scheme = localStorage.getItem('argus-boot-color-scheme')
+        if (!bg) {
+          const dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+          bg = dark ? '#111111' : '#f7f7f7'
+          scheme = dark ? 'dark' : 'light'
+        }
+        document.documentElement.style.backgroundColor = bg
+        // Hand the same resolved color to the boot splash below, which needs an
+        // opaque fill (it covers #root while React mounts).
+        document.documentElement.style.setProperty('--boot-bg', bg)
+        // `scheme` can still be null here: the bg key was cached by an older
+        // build that didn't write the scheme key. Fall back to the OS setting
+        // rather than leaving it unresolved — the splash text color below needs
+        // a definite answer or it risks dark-on-dark.
+        if (scheme !== 'dark' && scheme !== 'light') {
+          scheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+        }
+        document.documentElement.style.colorScheme = scheme
+        // Seed the splash's own foreground. It must be a custom property (not
+        // just `html { color }`): styles.css sets a `body` color once it loads,
+        // which would otherwise win over an inherited value and render the
+        // wordmark dark-on-dark.
+        document.documentElement.style.setProperty(
+          '--boot-fg',
+          scheme === 'light' ? '#111111' : '#f2f2f2'
+        )
+      } catch {
+        // localStorage unavailable — keep UA defaults.
+      }
+    </script>
+  </head>
+  <body>
+    <!-- ── Pre-JS splash ──────────────────────────────────────────────────
+         Painted by the HTML parser, before a single module is fetched. The
+         window is `show: false` until `ready-to-show` (electron/main.cjs),
+         which fires on the FIRST paint — previously that first paint was the
+         bare themed rectangle above, so the user stared at a blank window for
+         as long as the module graph took to execute (~10s in dev: 402 eager
+         modules across 10 request round-trips, plus a cold esbuild prebundle
+         of 46 packages).
+
+         This markup is intentionally inert: no classes from styles.css (that
+         sheet is a module import and arrives later), no webfonts, no images —
+         inline styles + system fonts only, so it cannot itself be blocked by
+         anything. `src/main.tsx` removes it right before `createRoot().render`.
+
+         ★ Do NOT move this into a component. Anything mounted inside
+         DesktopController (as the CONNECTING overlay is) cannot paint until
+         the whole eager graph has executed, which is exactly the gap being
+         covered here. -->
+    <div id="boot-splash" aria-hidden="true">
+      <div class="boot-splash__mark">ARGUS</div>
+      <div class="boot-splash__bar"><i></i></div>
+    </div>
+    <style>
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        /* Must be OPAQUE: React mounts into #root underneath, and during the
+           fade-out the app would otherwise show through the splash. The exact
+           shade comes from the script above via --boot-bg (same resolved value
+           as the <html> background, so the two can never drift); the literal
+           here is only a fallback for when that script threw. */
+        background: var(--boot-bg, #111111);
+        /* Set the color HERE rather than relying on inheritance: styles.css
+           (which lands later) sets a `body` color, and since #boot-splash is a
+           body descendant that would win over the value the script seeds on
+           <html> — the wordmark then renders dark-on-dark. --boot-fg is written
+           by the same script; the literal is the no-script fallback. */
+        color: var(--boot-fg, #f2f2f2);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        /* Fade the whole splash out on removal (see main.tsx). */
+        transition: opacity 220ms ease;
+      }
+      #boot-splash.is-leaving {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .boot-splash__mark {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.42em;
+        /* Deliberately quiet, but NOT faint: `currentColor` is seeded by the
+           script above to match the resolved scheme. Only one alpha step is
+           applied here — an earlier version stacked color-mix(55%) AND
+           opacity:0.55, compounding to ~30% and rendering the wordmark almost
+           invisible against the boot background. */
+        color: color-mix(in srgb, currentColor 62%, transparent);
+      }
+      /* Indeterminate track — we genuinely don't know the duration, so this is
+         a looping sweep rather than a fake percentage. */
+      .boot-splash__bar {
+        position: relative;
+        width: 132px;
+        height: 2px;
+        overflow: hidden;
+        border-radius: 2px;
+        background: color-mix(in srgb, currentColor 12%, transparent);
+      }
+      .boot-splash__bar > i {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 42px;
+        border-radius: 2px;
+        background: color-mix(in srgb, currentColor 48%, transparent);
+        animation: boot-splash-sweep 1.15s ease-in-out infinite;
+      }
+      @keyframes boot-splash-sweep {
+        0% { transform: translateX(-46px); }
+        100% { transform: translateX(132px); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash { transition: none; }
+        .boot-splash__bar > i { animation: none; width: 100%; transform: none; }
+      }
+    </style>
+    <div id="root" class="scrollbar-dt"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

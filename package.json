@@ -1,0 +1,62 @@
+{
+  "name": "argus",
+  "version": "1.0.0",
+  "description": "An AI agent with advanced tool-calling capabilities, featuring a flexible toolsets system for organizing and managing tools.",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "ui-tui",
+    "ui-tui/packages/*",
+    "web"
+  ],
+  "comment:install": [
+    "This is an npm workspaces monorepo: every workspace's dependencies hoist into",
+    "the SINGLE root node_modules (the lockfile expects ~1178 top-level packages,",
+    "while root package.json declares only 3 of them — the rest belong to web /",
+    "ui-tui / apps/desktop).",
+    "",
+    "Therefore: ALWAYS install from the repo root, and NEVER pass --workspace.",
+    "A per-workspace install recomputes the whole tree from that one workspace's",
+    "point of view and DELETES the packages it considers extraneous — so running a",
+    "'web only' install silently removes apps/desktop's vitest/typescript/jsdom",
+    "from the shared root node_modules. That is what the removed install:web /",
+    "install:tui / install:desktop / install:root scripts did, and it presented as",
+    "'I never touched node_modules but packages keep disappearing'.",
+    "",
+    "Prefer `npm ci` over `npm install`: it installs strictly from the lockfile and",
+    "wipes node_modules first, so you cannot end up in a half-installed state.",
+    "If tarballs report 'seems to be corrupted', that is the registry (or a stale",
+    "~/.npm/_cacache copy), not the tree: `npm cache clean --force`, then reinstall.",
+    "",
+    "audit:* below are read-only and safe. `npm audit fix --workspace <name>` is NOT",
+    "(same tree-rewrite hazard as install), which is why no audit:fix:* script exists."
+  ],
+  "scripts": {
+    "postinstall": "echo '✅ Browser tools ready. Run: python run_agent.py --help'",
+    "audit:root": "npm audit --workspaces=false",
+    "audit:web": "npm audit --workspace web",
+    "audit:tui": "npm audit --workspace ui-tui"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MMArgus-Team/Argus.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/MMArgus-Team/Argus/issues"
+  },
+  "homepage": "https://github.com/MMArgus-Team/Argus#readme",
+  "dependencies": {
+    "@streamdown/math": "^1.0.2",
+    "agent-browser": "^0.26.0",
+    "rcedit": "^5.0.1"
+  },
+  "overrides": {
+    "lodash": "4.18.1",
+    "@assistant-ui/store": "0.2.13",
+    "yauzl": "^3.3.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

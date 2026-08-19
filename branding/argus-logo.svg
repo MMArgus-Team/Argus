@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Argus Logo — 观察光圈 (Observation Aperture)
+
+  Design intent: three concentric layers convey "always-on observation":
+    outer  = dashed arc (radar / focus-reticle → 扫描感)
+    middle = solid ring (镜头/取景器)
+    center = solid dot (瞳孔/焦点)
+
+  Colours:
+    background circle: midnight blue #0B1220
+    outer arc + middle ring: fluorescent green #34D399 (alive / listening)
+    center dot: amber #F59E0B (attention / awake)
+
+  Usage:
+    * Master: this SVG (any size, vector)
+    * macOS app icon: export to 1024×1024 PNG → iconutil → .icns
+    * Windows: export to 256×256 PNG → convert to .ico
+    * Tray (single-colour): use `argus-logo-mono.svg` sibling
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Background: midnight blue, rounded-square (macOS/Windows friendly) -->
+  <defs>
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224"/>
+    </clipPath>
+    <radialGradient id="bgGrad" cx="50%" cy="45%" r="65%">
+      <stop offset="0%" stop-color="#0F1830"/>
+      <stop offset="100%" stop-color="#0B1220"/>
+    </radialGradient>
+    <radialGradient id="dotGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FBBF24"/>
+      <stop offset="60%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#B45309"/>
+    </radialGradient>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect width="1024" height="1024" fill="url(#bgGrad)"/>
+
+    <!--
+      Outer dashed arc: 12 segments around a 400px-radius circle, angled to
+      suggest sweep motion. stroke-dasharray produces the "reticle ticks" feel.
+    -->
+    <circle cx="512" cy="512" r="400"
+            fill="none" stroke="#34D399" stroke-opacity="0.55"
+            stroke-width="16" stroke-linecap="round"
+            stroke-dasharray="46 62"
+            transform="rotate(-15 512 512)"/>
+
+    <!-- Middle solid ring: the lens / viewfinder -->
+    <circle cx="512" cy="512" r="292"
+            fill="none" stroke="#34D399" stroke-opacity="0.9"
+            stroke-width="20"/>
+
+    <!--
+      Inner soft halo behind the pupil so the amber dot reads as "lit" against
+      the deep blue background instead of floating.
+    -->
+    <circle cx="512" cy="512" r="150"
+            fill="#F59E0B" fill-opacity="0.10"/>
+
+    <!-- Center pupil: amber dot with subtle radial glow -->
+    <circle cx="512" cy="512" r="110" fill="url(#dotGlow)"/>
+
+    <!--
+      Tiny highlight on the pupil (top-left) to give it life, mimicking a
+      real eye's specular. Kept subtle.
+    -->
+    <circle cx="472" cy="472" r="24" fill="#FEF3C7" fill-opacity="0.55"/>
+  </g>
+</svg>

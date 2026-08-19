@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Argus Logo — 单色版 (tray / menu-bar / favicon fallback)
+
+  用 currentColor 让 OS/CSS 决定颜色 (macOS 深浅色模式自动反色, Windows tray
+  跟随主题)。macOS 菜单栏放这个文件时, PNG 版必须命名为 *Template@2x.png,
+  Electron 会自动做 tint + retina 处理。
+
+  比彩色版 argus-logo.svg 简化: 去掉高光/内 halo, 只保留三层核心结构:
+    * 外圈虚线弧 (雷达刻度感)
+    * 中层实线圆环 (镜头)
+    * 中心实心点 (瞳孔)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" fill="currentColor">
+  <!-- 外圈虚线弧: 12 段间隔, 与彩色版一致 -->
+  <circle cx="512" cy="512" r="400"
+          fill="none" stroke="currentColor"
+          stroke-width="32" stroke-linecap="round"
+          stroke-dasharray="46 62"
+          transform="rotate(-15 512 512)"/>
+
+  <!-- 中层实线圆环 -->
+  <circle cx="512" cy="512" r="292"
+          fill="none" stroke="currentColor"
+          stroke-width="36"/>
+
+  <!-- 中心实心圆点 (瞳孔) -->
+  <circle cx="512" cy="512" r="110" fill="currentColor"/>
+</svg>

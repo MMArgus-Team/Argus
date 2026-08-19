@@ -1,0 +1,20 @@
+{
+  "id": "argus",
+  "name": "Argus",
+  "version": "0.1.0",
+  "description": "Multimodal real-time video agent with ACP editor integration: watch-and-chat visual Q&A, continuous monitoring, persistent visual memory, skills, and rich tool support.",
+  "repository": "https://github.com/MMArgus-Team/Argus",
+  "website": "https://github.com/MMArgus-Team/Argus",
+  "authors": [
+    "MMArgus Team"
+  ],
+  "license": "MIT",
+  "distribution": {
+    "uvx": {
+      "package": "mm-argus[acp]==0.1.0",
+      "args": [
+        "hermes-acp"
+      ]
+    }
+  }
+}
