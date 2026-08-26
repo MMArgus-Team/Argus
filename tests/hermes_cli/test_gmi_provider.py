@@ -30,6 +30,35 @@ from agent.model_metadata import get_model_context_length
 
 
 @pytest.fixture(autouse=True)
+def _no_live_provider_catalog(monkeypatch):
+    """Never let these tests reach the real GMI ``/v1/models`` endpoint.
+
+    ``provider_model_ids("gmi")`` has two live-fetch layers, and stubbing only
+    the first one leaves the test at the mercy of the network:
+
+      1. the dedicated ``gmi`` branch, which calls
+         ``hermes_cli.models.fetch_api_models`` — the seam the tests below
+         already patch; and
+      2. the generic profile-based fetch that runs when (1) returns nothing,
+         which calls ``ProviderProfile.fetch_models`` and talks to
+         ``https://api.gmi-serving.com/v1/models`` over plain urllib.
+
+    Layer (2) answers a bogus Bearer token inconsistently — sometimes HTTP 401
+    (fetch returns None, static fallback wins, test green), sometimes HTTP 200
+    with the full ~77-model public catalog, which is then merged curated-first
+    and makes ``test_provider_model_ids_falls_back_to_static_models`` fail with
+    "Left contains 69 more items". That is exactly how it failed in CI while
+    passing locally. Blocking layer (2) here makes the fallback assertion mean
+    what its name says.
+    """
+    from providers.base import ProviderProfile
+
+    monkeypatch.setattr(
+        ProviderProfile, "fetch_models", lambda self, **kwargs: None
+    )
+
+
+@pytest.fixture(autouse=True)
 def _clear_provider_env(monkeypatch):
     for key in (
         "OPENROUTER_API_KEY",
@@ -118,6 +147,16 @@ class TestGmiModelCatalog:
             },
         )
         monkeypatch.setattr("hermes_cli.models.fetch_api_models", lambda api_key, base_url: None)
+
+        # Two static lists have to stay in lockstep for this to hold: with both
+        # live layers dead, provider_model_ids returns the *profile's*
+        # fallback_models, while the assertion below names _PROVIDER_MODELS.
+        # Pin the equality separately so a future divergence reports itself
+        # instead of showing up as a puzzling diff in the assertion after it.
+        from providers import get_provider_profile
+
+        profile = get_provider_profile("gmi")
+        assert list(profile.fallback_models) == list(_PROVIDER_MODELS["gmi"])
 
         assert provider_model_ids("gmi") == list(_PROVIDER_MODELS["gmi"])
 
