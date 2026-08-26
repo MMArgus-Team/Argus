@@ -2702,11 +2702,15 @@ class MemoryLLMClient:
 
     async def call_chat(
         self, messages: List[Dict[str, Any]], *,
-        max_tokens: int, temperature: Optional[float] = None,
-        usage_kind: str = "",
+        max_tokens: int, usage_kind: str = "",
     ) -> Optional[str]:
         """Run one chat call, returning the body text (thinking stripped), or None
-        on failure/timeout."""
+        on failure/timeout.
+
+        ★ No sampling params in the signature either: 17bd04845 stopped sending
+        temperature/top_p/top_k on the wire, so keeping a required ``temperature``
+        here only produced TypeErrors at call sites that had already dropped it.
+        """
         raise NotImplementedError
 
     async def aclose(self) -> None:
@@ -2782,8 +2786,7 @@ class OpenAIMemoryClient(MemoryLLMClient):
 
     async def call_chat(
         self, messages: List[Dict[str, Any]], *,
-        max_tokens: int, temperature: Optional[float] = None,
-        usage_kind: str = "",
+        max_tokens: int, usage_kind: str = "",
     ) -> Optional[str]:
         self.last_error = ""
         messages = self._audio_url_to_input_audio(messages)
@@ -2984,8 +2987,8 @@ class MessagesMemoryClient(MemoryLLMClient):
         except Exception:
             pass
 
-    async def _post(self, messages: List[Dict[str, Any]], max_tokens: int,
-                    temperature: float) -> Dict[str, Any]:
+    async def _post(self, messages: List[Dict[str, Any]],
+                    max_tokens: int) -> Dict[str, Any]:
         # Function-local import avoids the hermes_glue -> core -> _workers
         # import cycle while keeping memory on the same /v1/messages wire
         # conversion path as MessagesChatCompletionsClient.
@@ -3024,8 +3027,7 @@ class MessagesMemoryClient(MemoryLLMClient):
 
     async def call_chat(
         self, messages: List[Dict[str, Any]], *,
-        max_tokens: int, temperature: Optional[float] = None,
-        usage_kind: str = "",
+        max_tokens: int, usage_kind: str = "",
     ) -> Optional[str]:
         self.last_error = ""
         cur_messages = _drop_empty_image_parts(messages)
@@ -3034,7 +3036,7 @@ class MessagesMemoryClient(MemoryLLMClient):
         try:
             while True:
                 try:
-                    data = await self._post(cur_messages, max_tokens, temperature)
+                    data = await self._post(cur_messages, max_tokens)
                     usage = data.get("usage")
                     if self.on_usage is not None and isinstance(usage, dict):
                         try:
@@ -3189,8 +3191,7 @@ class GeminiMemoryClient(MemoryLLMClient):
 
     async def call_chat(
         self, messages: List[Dict[str, Any]], *,
-        max_tokens: int, temperature: Optional[float] = None,
-        usage_kind: str = "",
+        max_tokens: int, usage_kind: str = "",
     ) -> Optional[str]:
         sys_inst, contents = _oai_messages_to_gemini(messages)
         # ★ 强制提到 65535 (见上面 docstring 解释): qwen3.5 关 thinking 用 2560 够,
@@ -5315,7 +5316,7 @@ class MemoryWriter:
                 parts.append(frame_to_image_content(f))
         return parts
 
-    async def _call_llm(self, messages, *, max_tokens: int, temperature: float,
+    async def _call_llm(self, messages, *, max_tokens: int,
                         kind: str, extra: Optional[Dict[str, Any]] = None
                         ) -> Optional[str]:
         t0 = time.time()
@@ -5326,8 +5327,7 @@ class MemoryWriter:
         #   捕获异常并 log, 失败时返回 None, 这里 except 仅兜底兜不到的极端情况.
         try:
             raw = await self.client.call_chat(
-                messages, max_tokens=max_tokens, temperature=temperature,
-                usage_kind=kind)
+                messages, max_tokens=max_tokens, usage_kind=kind)
         except Exception as e:
             err = repr(e)
             log.warning("[writer LLM %s] %.2fs unexpected %s",
@@ -5342,7 +5342,6 @@ class MemoryWriter:
             ex = dict(extra or {})
             if err: ex["error"] = err
             ex["max_tokens"] = max_tokens
-            ex["temperature"] = temperature
             ex["memory_backend"] = self.client.name
             ex["memory_model"] = self.client.model
             await self.recorder.record(
@@ -6326,7 +6325,7 @@ class MemoryReviewer:
             parts.append(frame_to_image_content(f))
         return parts
 
-    async def _call_llm(self, messages, *, max_tokens, temperature,
+    async def _call_llm(self, messages, *, max_tokens,
                          kind, extra) -> Optional[str]:
         t0 = time.time()
         raw: Optional[str] = None
@@ -6357,8 +6356,7 @@ class MemoryReviewer:
             for attempt in range(max_retries + 1):
                 try:
                     raw = await self.client.call_chat(
-                        messages, max_tokens=max_tokens,
-                        temperature=temperature, usage_kind=kind)
+                        messages, max_tokens=max_tokens, usage_kind=kind)
                 except Exception as e:
                     err = repr(e)
                     raw = None
@@ -6386,7 +6384,6 @@ class MemoryReviewer:
             ex = dict(extra or {})
             if err: ex["error"] = err
             ex["max_tokens"] = max_tokens
-            ex["temperature"] = temperature
             ex["reviewer_backend"] = self.client.name
             ex["reviewer_model"] = self.client.model
             try:
@@ -7230,6 +7227,9 @@ class WatcherWorker:
     async def react_step(
         self, *, task_instruction: str, ask_ts: float, round_idx: int,
         search_log: List[str], recall_log: List[str],
+        #: RecallResult.origin → 次数, 只用于 DIAG 归因 (react / react+seed /
+        #: fast_table)。见 _run() 里 rres 的处理。
+        recall_origins: Optional[Dict[str, int]] = None,
         recall_frame_ids: Optional[List[str]] = None,
         seen_search_briefs: Optional[set] = None,
         seen_recall_briefs: Optional[set] = None,
@@ -7549,13 +7549,17 @@ class WatcherWorker:
             log.info(
                 "[watcher react DIAG] round=%d frames=%d recall_frames=%d | "
                 "text_total=%d sys=%d(prev=%d) :: task=%d macro=%d "
-                "entity=%d(n=%d) search=%d(obs=%d) recall=%d(obs=%d) seen=%d recall_hint=%d",
+                "entity=%d(n=%d) search=%d(obs=%d) recall=%d(obs=%d,%s) "
+                "seen=%d recall_hint=%d",
                 round_idx, len(frames), len(recall_stored),
                 len(text), _sys_len, len(prev_block),
                 len(task_instruction or ""),
                 len(macro_summary), len(ent_snap), len(ents),
                 len(search_block), len(search_log),
                 len(recall_block), len(recall_log),
+                ",".join(
+                    f"{k}:{v}" for k, v in
+                    sorted((recall_origins or {}).items())) or "-",
                 len(seen_block), len(recall_frames_hint),
             )
         except Exception:
@@ -8027,6 +8031,8 @@ class WatcherWorker:
             try:
                 search_log: List[str] = []        # 累积每轮 search findings
                 recall_log: List[str] = []        # 累积每轮 recall findings
+                # ★ 本次 delegation 里每条 recall 结果的来路计数, 进 DIAG 分项。
+                recall_origins: Dict[str, int] = {}
                 recall_frame_ids: List[str] = []  # 累积召回(已 verify)的 frame_ids
                 facts_added: List[str] = []
                 # Live AnySearch observations become structured candidates, but
@@ -8089,7 +8095,8 @@ class WatcherWorker:
                         step = await self.react_step(
                             task_instruction=task_instruction, ask_ts=effective_ask_ts,
                             round_idx=round_idx, search_log=search_log,
-                            recall_log=recall_log, recall_frame_ids=recall_frame_ids,
+                            recall_log=recall_log, recall_origins=recall_origins,
+                            recall_frame_ids=recall_frame_ids,
                             seen_search_briefs=seen_sq,
                             seen_recall_briefs=seen_rq,
                             # ★ 本批帧 (WatcherAgent 游标从 HEAD→tail 逐批给的历史帧,
@@ -8345,6 +8352,18 @@ class WatcherWorker:
                                 seen_rq.add(_completed_key)
                             if rres.findings:
                                 recall_log.append(rres.findings)
+                            recall_origins[rres.origin] = (
+                                recall_origins.get(rres.origin, 0) + 1)
+                            # ★ origin 让日志能区分三条路: 纯 ReAct / 带 r0 种子
+                            #   观察的 ReAct / 显式编号短路。之前 fast_table 走
+                            #   rounds=0 静默返回, 这条路在 watcher 侧完全不可见,
+                            #   命中率和采纳率都无从统计。
+                            log.info(
+                                "[watcher recall] task=%s origin=%s rounds=%d "
+                                "findings=%d chars frames=%d %.2fs",
+                                tid, rres.origin, rres.rounds,
+                                len(rres.findings), len(rres.frame_ids),
+                                rres.elapsed_sec)
                             for fid in rres.frame_ids:
                                 if fid not in recall_frame_ids:
                                     recall_frame_ids.append(fid)
@@ -8355,6 +8374,7 @@ class WatcherWorker:
                                                 "brief": t_brief,
                                                 "findings_len": len(rres.findings),
                                                 "rounds": rres.rounds,
+                                                "origin": rres.origin,
                                                 "n_clues": len(rres.clues),
                                                 "elapsed_sec": rres.elapsed_sec,
                                                 "found": bool(
@@ -8541,6 +8561,11 @@ class RecallResult:
     clues: List[str] = field(default_factory=list)
     # ★ 累积从工具 obs 里抓到的 frame_ids (供前端续写拉真图 / UI 展示)
     frame_ids: List[str] = field(default_factory=list)
+    #: 这份结果是怎么来的, 供上层日志/DIAG 归因 (见 RecallAgent.run):
+    #:   "react"        普通 ReAct 循环
+    #:   "react+seed"   ReAct, 且第 0 轮带了 search_screen_text 种子观察
+    #:   "fast_table"   显式 Table/图 编号命中, 跳过了整个 ReAct 循环
+    origin: str = "react"
 
 
 def _dedupe_frame_ids(frame_ids: List[str]) -> List[str]:
@@ -11072,26 +11097,113 @@ class RecallAgent:
             })
         return out
 
+    #: 主 Agent 委派 QueryWorker 时注入的模板 (见 tools/mm_memory_tool.py) 形如
+    #: ``### HEADER\n<正文>`` 段 + 若干段固定说明。触发判断与检索 query 只应该看
+    #: <正文>: 固定说明里有 "The brief must not narrow, replace, ..." 这种措辞,
+    #: 而 "narrow" 内嵌的 "row" 曾让 _looks_like_table_recall_query 命中 —— 于是
+    #: 几乎每次主 Agent 委派都会误触发表格快路径 (2026-08-26 实测)。
+    _DELEGATION_SECTION_MARK = "### AUTHORITATIVE ORIGINAL USER QUESTION"
+
+    @classmethod
+    def _delegation_payload(cls, text: str) -> str:
+        """Strip the template's own instruction prose out of a delegation text.
+
+        Keeps only the body of each ``### HEADER`` block (the original user
+        question and the main agent's brief) and drops the paragraphs the
+        template itself contributes.  Returns ``text`` unchanged when the marker
+        is absent, so a plain user question is never touched.
+
+        This feeds trigger detection and retrieval-query building only — never
+        what the LLM sees — so if a multi-paragraph question ever lost a trailing
+        paragraph here it would be a retrieval-quality tradeoff, not a
+        correctness one.  Falls back to the raw text if nothing parses, which is
+        safe because the word-boundary fix below independently kills the
+        "narrow" class of false positives.
+        """
+        s = str(text or "")
+        if cls._DELEGATION_SECTION_MARK not in s:
+            return s
+        kept: List[str] = []
+        for block in s.split("\n\n"):
+            b = block.strip()
+            if not b.startswith("###"):
+                continue
+            body = "\n".join(b.splitlines()[1:]).strip()
+            if body:
+                kept.append(body)
+        return "\n\n".join(kept) if kept else s
+
     @staticmethod
     def _looks_like_table_recall_query(text: str) -> bool:
         q = str(text or "").lower()
         if not q:
             return False
+        # ★ 2026-08-26: 每个 ASCII 词都必须带词边界。原来 row|rows|column|columns|
+        #   dataset|paper|slide 等是裸子串匹配, 所以 "narrow" → row, "growth" → row,
+        #   "newspaper" → paper 都会命中。CJK 词不需要边界 (无字母粘连问题)。
         return bool(re.search(
             r"(?<![A-Za-z])(?:table|fig(?:ure)?)\s*\.?\s*\d*(?![A-Za-z])|"
-            r"表\s*\d*|图\s*\d*|论文|paper|pdf|slide|"
-            r"benchmark|dataset|datasets|column|columns|row|rows|"
-            r"图表|表格|第\s*\d+\s*页",
+            r"(?<![A-Za-z])(?:papers?|pdf|slides?|benchmarks?|datasets?|"
+            r"columns?|rows?)(?![A-Za-z])|"
+            r"表\s*\d*|图\s*\d*|论文|图表|表格|第\s*\d+\s*页",
             q, re.IGNORECASE))
+
+    def _screen_text_query(self, *, brief: str, user_text: str) -> str:
+        """Retrieval query for the screen-text arm: brief + delegation payload."""
+        return " ".join(x for x in [
+            str(brief or "").strip(),
+            self._delegation_payload(user_text).strip(),
+        ] if x)
+
+    def _screen_text_seed_calls(
+        self, *, brief: str, user_text: str,
+    ) -> List[Dict[str, Any]]:
+        """Round-0 seed observation: one cheap deterministic search_screen_text.
+
+        This is what table-ish questions get *instead of* the old short-circuit.
+        The lookup is the same one _table_fast_path used to run, but its result is
+        injected as the round-0 tool observation rather than returned as the final
+        findings.  An easy question therefore still finishes in a single LLM turn
+        (the latency win the fast path was built for), while a question whose
+        answer actually lives elsewhere — audio subtitles, historical frames —
+        can escalate, and the result still goes through distillation and frame
+        verification like any other observation.
+        """
+        if self.screen_table_store is None and self.screen_text_store is None:
+            return []
+        query = self._screen_text_query(brief=brief, user_text=user_text)
+        if not self._looks_like_table_recall_query(query):
+            return []
+        return [{"name": "search_screen_text",
+                 "args": {"query": query, "limit": 8}}]
 
     async def _table_fast_path(
         self, *, brief: str, user_text: str, ask_ts: float,
         emit: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Optional[RecallResult]:
-        query = " ".join(x for x in [brief, user_text] if str(x or "").strip())
+        """Deterministic short-circuit, restricted to *explicitly numbered*
+        table/figure references ("Table 3", "表3", "图2").
+
+        ★ 2026-08-26: ref_terms 由"过滤器"改成"前置条件"。原来任何 table-ish 查询
+        都能短路掉整条 recall, ref_terms 仅在非空时才附带校验一次 —— 于是没有编号
+        引用的问题 (绝大多数) 会拿一份未蒸馏、未做帧核验的 OCR 原文直接当召回结论
+        返回 (rounds=0), 而且一旦证据不足没有任何升级路径。只有"答案就是某个具体
+        单元格"这一类才值得跳过 ReAct; 其余交给 _screen_text_seed_calls 的第 0 轮
+        种子观察。
+        """
+        query = self._screen_text_query(brief=brief, user_text=user_text)
         if not self._looks_like_table_recall_query(query):
             return None
         if self.screen_table_store is None and self.screen_text_store is None:
+            return None
+        # ★ 前置条件: 没有显式编号引用就不短路。放在工具调用之前, 顺带省掉
+        #   常见情况下那次多余的 screen-text 查询 (种子路径会自己查一次)。
+        ref_terms = ScreenTableStore._table_ref_terms(query)
+        if not ref_terms:
+            log.info(
+                "[recall fast-table] no explicit table/figure number in "
+                "query=%r; deferring to a round-0 seed observation",
+                query[:120])
             return None
 
         t0 = time.time()
@@ -11112,32 +11224,32 @@ class RecallAgent:
         )
         if not (has_structured or has_text):
             return None
-        ref_terms = ScreenTableStore._table_ref_terms(query)
-        if ref_terms:
-            body_lines = [
-                ln for ln in obs_s.splitlines()
-                if not ln.startswith("[search_screen_text ")
-                and not ln.startswith("[structured_tables ")
-            ]
-            body = "\n".join(body_lines).lower()
-            body_norm = re.sub(r"[^a-z0-9]+", "", body)
-            ref_hit = False
-            for ref in ref_terms:
-                ref_l = ref.lower()
-                ref_norm = re.sub(r"[^a-z0-9]+", "", ref_l)
-                use_norm = bool(
-                    len(ref_norm) >= 3
-                    and re.search(r"[a-z]", ref_norm)
-                    and re.search(r"\d", ref_norm))
-                if ref_l in body or (use_norm and ref_norm in body_norm):
-                    ref_hit = True
-                    break
-            if not ref_hit:
-                log.info(
-                    "[recall fast-table] skip: explicit refs %s absent in "
-                    "matched screen text for query=%r",
-                    ref_terms[:6], query[:120])
-                return None
+        # ref_terms 已在上面确认非空, 这里是第二道闸: 引用词必须真的出现在命中
+        # 文本里 —— 否则只是"这段屏幕文字提到了同一个话题", 不足以短路。
+        body_lines = [
+            ln for ln in obs_s.splitlines()
+            if not ln.startswith("[search_screen_text ")
+            and not ln.startswith("[structured_tables ")
+        ]
+        body = "\n".join(body_lines).lower()
+        body_norm = re.sub(r"[^a-z0-9]+", "", body)
+        ref_hit = False
+        for ref in ref_terms:
+            ref_l = ref.lower()
+            ref_norm = re.sub(r"[^a-z0-9]+", "", ref_l)
+            use_norm = bool(
+                len(ref_norm) >= 3
+                and re.search(r"[a-z]", ref_norm)
+                and re.search(r"\d", ref_norm))
+            if ref_l in body or (use_norm and ref_norm in body_norm):
+                ref_hit = True
+                break
+        if not ref_hit:
+            log.info(
+                "[recall fast-table] skip: explicit refs %s absent in "
+                "matched screen text for query=%r",
+                ref_terms[:6], query[:120])
+            return None
 
         frame_ids = _dedupe_frame_ids(FrameStore.extract_frame_ids(obs_s))
         frame_ids = frame_ids[:max(1, int(self.cfg.recall_verify_max_frames))]
@@ -11181,6 +11293,7 @@ class RecallAgent:
             elapsed_sec=elapsed,
             clues=[obs_s],
             frame_ids=frame_ids,
+            origin="fast_table",
         )
 
     @staticmethod
@@ -11259,16 +11372,26 @@ class RecallAgent:
                 except Exception as e: log.warning("[recall progress] %s", e)
 
         t0 = time.time()
-        log.info("[recall] start model=%s brief=%r initial=%d ask_ts=%.2f",
-                 self.model, brief[:80], len(initial_calls), ask_ts)
+        # ★ 2026-08-26: 便宜的 screen-text 检索从"短路"降级成"第 0 轮种子观察"。
+        #   短路只留给带显式编号引用 (Table 3 / 表3) 且引用词真的出现在命中文本
+        #   里的场景 (见 _table_fast_path); 其余情况仍然做这一次检索, 但把结果
+        #   当成 r0 的一条观察塞进 ReAct, 让 LLM 看着证据自己决定要不要再上
+        #   search_audio / 帧检索——升级路径不再被短路吃掉。
+        seed_calls = self._screen_text_seed_calls(
+            brief=brief, user_text=user_text)
+        log.info(
+            "[recall] start model=%s brief=%r initial=%d seed=%d ask_ts=%.2f",
+            self.model, brief[:80], len(initial_calls), len(seed_calls), ask_ts)
         await _emit({"phase": "start", "brief": brief,
-                     "n_initial": len(initial_calls), "ask_ts": ask_ts,
+                     "n_initial": len(initial_calls),
+                     "n_seed": len(seed_calls), "ask_ts": ask_ts,
                      "model": self.model})
 
         fast_result = await self._table_fast_path(
             brief=brief, user_text=user_text, ask_ts=ask_ts, emit=_emit)
         if fast_result is not None:
             await _emit({"phase": "done", "elapsed_sec": fast_result.elapsed_sec,
+                         "origin": fast_result.origin, "n_seed": 0,
                          "rounds": fast_result.rounds,
                          "n_clues": len(fast_result.clues),
                          "findings_len": len(fast_result.findings),
@@ -11295,8 +11418,13 @@ class RecallAgent:
                 args_s = repr(args)
             return f"{name}\x00{args_s}"
 
-        # 处理 initial_calls (作为 r0)
-        pending_calls: List[Dict[str, Any]] = list(initial_calls)
+        # 处理 initial_calls (作为 r0)。种子观察排在 initial_calls 前面: 它是
+        # 最便宜的一手证据, 放前面让 decide 的第一段上下文就带上它。
+        # 注意: 如果 _table_fast_path 已经打过一次 search_screen_text 却因为
+        # "引用词没出现在命中文本里"而放弃短路, 这里会重复一次同样的查询。那是
+        # 一次本地 FTS (~0.01s, 无 LLM), 不值得为它加一层缓存。
+        pending_calls: List[Dict[str, Any]] = list(seed_calls) + list(initial_calls)
+        seed_used = len(seed_calls)
 
         for round_idx in range(0, self.cfg.recall_max_rounds):
             rounds_used = round_idx + 1
@@ -11704,10 +11832,13 @@ class RecallAgent:
             collected_fids, "\n".join([final_findings] + clues))
 
         elapsed = time.time() - t0
-        log.info("[recall] done %.2fs rounds=%d clues=%d findings=%d chars frames=%d",
-                 elapsed, rounds_used, len(clues),
+        origin = "react+seed" if seed_used else "react"
+        log.info("[recall] done %.2fs origin=%s rounds=%d seed=%d clues=%d "
+                 "findings=%d chars frames=%d",
+                 elapsed, origin, rounds_used, seed_used, len(clues),
                  len(final_findings), len(collected_fids))
         await _emit({"phase": "done", "elapsed_sec": elapsed,
+                     "origin": origin, "n_seed": seed_used,
                      "rounds": rounds_used, "n_clues": len(clues),
                      "findings_len": len(final_findings),
                      "findings_preview": final_findings[:2000],
@@ -11723,6 +11854,7 @@ class RecallAgent:
             findings=final_findings, rounds=rounds_used,
             elapsed_sec=elapsed, clues=clues,
             frame_ids=collected_fids,
+            origin=origin,
         )
 
     async def _distill(self, *, raw_obs: str,

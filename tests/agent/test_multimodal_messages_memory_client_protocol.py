@@ -59,7 +59,7 @@ async def _call_with_mock_post(
     client._client.post = post
     try:
         result = await client.call_chat(
-            messages, max_tokens=512, temperature=0.2,
+            messages, max_tokens=512,
         )
     finally:
         await client.aclose()

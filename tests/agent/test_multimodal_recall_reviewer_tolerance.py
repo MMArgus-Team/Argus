@@ -369,7 +369,6 @@ def test_reviewer_retries_only_transient_overload():
     raw = asyncio.run(reviewer._call_llm(
         [{"role": "user", "content": "review"}],
         max_tokens=128,
-        temperature=0.2,
         kind="memory_reviewer",
         extra={},
     ))
