@@ -132,20 +132,46 @@ jobs:
         with:
           pattern: test-durations-slice-*
           path: durations
-          merge-multiple: true
+          # NO merge-multiple here. Every slice uploads a file with the same
+          # basename (test_durations.json), so merging all artifacts into one
+          # directory makes the 8 of them collide on a single path and the
+          # extracted contents get concatenated — which is how this job died
+          # with "json.decoder.JSONDecodeError: Extra data". Without the flag
+          # each artifact lands in durations/test-durations-slice-<N>/, so the
+          # per-slice files stay separate (and are actually all read, instead
+          # of 7 of them being silently lost to the collision).
 
       - name: Merge into single durations file
         run: |
-          python3 -c "
-          import json, glob, os
-          merged = {}
-          for f in glob.glob('durations/*test_durations.json'):
-            with open(f) as fh:
-              merged.update(json.load(fh))
+          python3 - <<'PY'
+          import glob
+          import json
+
+          paths = sorted(glob.glob('durations/**/test_durations.json', recursive=True))
+          if not paths:
+              raise SystemExit('No per-slice duration files found under durations/')
+
+          merged: dict[str, float] = {}
+          bad = []
+          for path in paths:
+              try:
+                  with open(path) as fh:
+                      merged.update(json.load(fh))
+              except (json.JSONDecodeError, OSError) as exc:
+                  # The cache is a scheduling optimisation, not correctness:
+                  # one unreadable slice should degrade balance, not red-light
+                  # the whole run. Still fail if *nothing* parsed.
+                  bad.append(f'{path}: {exc}')
+
+          for line in bad:
+              print(f'::warning::skipping unreadable durations file {line}')
+          if not merged:
+              raise SystemExit('No usable duration data in any slice artifact')
+
           with open('test_durations.json', 'w') as fh:
-            json.dump(merged, fh, indent=2, sort_keys=True)
-          print(f'Merged {len(merged)} file durations')
-          "
+              json.dump(merged, fh, indent=2, sort_keys=True)
+          print(f'Merged {len(merged)} file durations from {len(paths) - len(bad)} slice(s)')
+          PY
 
       - name: Save merged duration cache
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
