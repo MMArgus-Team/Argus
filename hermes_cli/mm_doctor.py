@@ -20,7 +20,7 @@ def _load_mm_config():
 
     Returns ``(cfg, raw_cfg)``: the flat Config (or None) and the original
     nested config dict (or None). ``raw_cfg`` carries values that live only in
-    the nested layout (e.g. auxiliary.voice_intent.local_path). Any failure
+    the nested layout (e.g. auxiliary.vision.base_url). Any failure
     degrades to (None, None) so the probe still reports gaps rather than crash.
     """
     raw_cfg = None

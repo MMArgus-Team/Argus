@@ -226,7 +226,6 @@ model:
 
 # ── Auxiliary clients ──
 # vision: vision_analyze 工具 + 浏览器截图分析。text: 文本改写 + 语音意图分诊。
-#   use_local=true → 本地小模型; false → remote_backend (远端端点)。
 auxiliary:
   vision:
     provider: "custom"
@@ -234,12 +233,6 @@ auxiliary:
     base_url: ""
     api_key: ""
   text:
-    use_local: false               # 意图+EOU 合并调用 & 分诊走远端
-    local_backend:                 # 本地小模型 (Qwen2.5-0.5B-Instruct)
-      local_path: "weights/qwen2.5-0.5b-instruct"     # 相对路径按 HERMES_HOME 解析
-      local_hf_repo: "Qwen/Qwen2.5-0.5B-Instruct"     # 仅 download_weights.py 读
-      local_device: "auto"         # auto / cpu / cuda / mps
-      local_dtype: "auto"          # auto / float16 / bfloat16 / float32
     remote_backend:
       provider: "custom"
       model: "GPT-5.6 Luna"

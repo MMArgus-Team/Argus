@@ -31,7 +31,7 @@ audio: {
 }
 ```
 
-但注释���有一句很清醒的自���之明：这是浏览器/Electron 的天花板——能压稳态噪音，**做不到波束成形或指向性拾音**，所以附近的人声照样漏进来。这句话很重要，它直接解释了为什么后面需要一个"意图过滤器"（2.5 节）。硬件层做不到的事，只能在软件层用小模型兜。
+但注释里有一句很清醒的自知之明：这是浏览器/Electron 的天花板——能压稳态噪音，**做不到波束成形或指向性拾音**，所以附近的人声照样漏进来。硬件层做不到的事，只能在软件层兜。
 
 降采样的活儿，交给一个**专用音频线程**（AudioWorklet），而不是主 JS 线程——这样 UI 不会被卡（[apps/desktop/public/pcm-worklet.js](apps/desktop/public/pcm-worklet.js)）：
 
@@ -181,31 +181,6 @@ async def _asr_reconnect(self, key: str) -> None:
 
 还有一个藏得很深的坑，值得单独点出。当 ASR 识别出 final、要提交处理时，这个回调是跑在 WatcherAgent 的 asyncio loop 上的。如果在这里**内联**跑完整个同步的主 Agent turn（里面还有串行 TTS 队列、还在喂 ASR 音频），就会把那个 loop 饿死——表现是"打字不卡，但一用语音就卡"。解法是把 turn 扔到**专用线程**去跑（`server.py:11235`）。这个"别在事件循环上干重活"的教训，你在"看""听""说"每一层都会再遇到。
 
-## 2.5 本地 0.5B 意图模型：判"这话是不是跟我说的"
-
-回到 2.1 节那个坑：软件 3A 压不住附近的人声。所以在 ASR 识别出文本之后、真正响应之前，需要一个**前置意图过滤器**：这句话，到底是不是在跟助手说话？
-
-这就是本地 0.5B 模型的用武之地（[agent/multimodal/voice_intent_local.py](agent/multimodal/voice_intent_local.py)）。用的是 **Qwen2.5-0.5B-Instruct**，跑在 transformers + torch 上，三大操作系统都有官方 wheel。它的存在理由是延迟：远端意图判断 P50 约 800ms，本地 0.5B 在 CPU 上 P50 约 200–400ms，GPU/MPS 上更是低于 100ms。
-
-它有两个能力，对应两个 prompt：
-
-**（一）`judge_addressed` —— 二分类"是否在跟我说话"。** system prompt 写得像一份判据清单：
-
-> 寒暄、命令（帮我…/你能…/打开…）、称呼（小e/助手）、疑问（…吗？）、承接对话 → **是**；电视/背景对话、自言自语、感叹句、无意义语气 → **否**；只输出一个字：是 或 否。
-
-推理用贪心 `generate(max_new_tokens=2)`，只看第一个 token 是"是"还是"否"——极致压延迟。
-
-**（二）`decide_route_local` —— 更进一步的分诊。** `self`（0.5B 自己产一句口语回答，让"好的""嗯"这种秒回）vs `main_agent`（委派主 Agent 处理）。
-
-几个工程要点让它"不���乱"：
-
-- **后台预热、fire-and-forget**：VoiceAgent 启动时就异步加载权重，没加载完就返回 `None`，上游 fallback 到远端。首次调用绝不阻塞语音链路。
-- **一切失败静默返回 `None`**——never break the voice pipeline。加载失败、推理异常，都退回远端裁决，不影响用户。
-- **设备/精度自动**：cuda > mps > cpu；CPU 上用 fp32（没有原生 fp16 硬件时 fp16 反而慢）。
-- **支持 HF cache 布局**：权重路径能自动识别 `snapshots/<hash>/` 目录，也能兜底当 HF repo id 拉。
-
-> **一个诚实的现状：** 本地 0.5B 是一条**完整实现、但当前默认关闭**的快路（`voice_agent_v2.py:351`）。线上目前全走远端 `deepseek-v4-flash`。分诊调度器 `judge_addressed_to_me` 是双层策略：开了本地就先本地、明确判决就返回，`None` 或异常才 fallback 远端。介绍它是因为这个"本地小模型做前置过滤"的设计模式很值得借鉴——即使它现在没在跑。
-
 ## 2.6 barge-in：你一开口，它就闭嘴
 
 打断，是对话式 AI 最能体现"活人感"的一个细节。你话说到一半觉得它答偏了，一开口，它就该立刻停下来听你。做不到这一点，再聪明的 Agent 也像个只会自顾自念稿的机器。
@@ -286,7 +261,6 @@ backend.submit_env_audio(audio_bytes, window_ts=window_ts)
 - 流式 ASR 的 WebSocket 协议里，等 `session.updated` ack 是"第一句不丢"的关键；
 - 死 socket 用 `is_connected` 探活 + 去抖重连自愈，长会话不"聋"；
 - 麦克风 3 态生命周期 + 阻塞式 asr_start 保证首句稳落；
-- 本地 0.5B 意图模型（备选快路）判"这话是不是跟我说的"；
 - barge-in 快慢两路 + `__interrupt__` 哨兵 + 回采门，做出"一开口就闭嘴"；
 - 音视频统一戳到帧时钟，声音和画面才对得上。
 

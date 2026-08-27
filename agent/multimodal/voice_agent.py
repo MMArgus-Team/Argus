@@ -230,21 +230,6 @@ class VoiceAgent:
         self._ready.wait(timeout=10.0)
         if not self._healthy:
             log.warning("[voice] start: loop not healthy (sid=%s)", self._sid)
-        # Local intent model (BitCPM4-0.5B) lifecycle is owned by the readiness
-        # module (agent/multimodal/readiness.py) — same place that runs every
-        # other MM startup check + preload + endpoint probe. Here we only
-        # consult its verdict to decide whether the runtime should route
-        # through the local path or fall back to the remote endpoint.
-        try:
-            from agent.multimodal.readiness import should_use_local_aux_text
-            if not should_use_local_aux_text(self._cfg):
-                # Weights missing / load failed / config says remote. Force
-                # the in-memory use_local flag off so downstream branches
-                # take the remote path immediately without probing again.
-                self._aux_voice_intent = dict(self._aux_voice_intent)
-                self._aux_voice_intent["use_local"] = False
-        except Exception as exc:
-            log.debug("[voice] readiness consult skipped: %s", exc)
 
     def _run(self) -> None:
         loop = asyncio.new_event_loop()

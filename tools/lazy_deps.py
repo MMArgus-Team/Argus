@@ -123,17 +123,6 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "tts.edge": ("edge-tts==7.2.7",),
     "tts.elevenlabs": ("elevenlabs==1.59.0",),
 
-    # ─── Local small-model inference (VoiceAgent v2 L3 intent classifier) ────
-    # Qwen2.5-0.5B-Instruct via HuggingFace transformers + torch (safetensors, FP16
-    # or auto dtype). 跨平台: torch/transformers 三大 OS 都有官方 PyPI wheel.
-    # 权重首次自动从 HF cache 拉取 (~1GB), 支持 HF_ENDPOINT 镜像.
-    # 推理: CPU 上 P50 ~200-400ms, MPS/CUDA <100ms. 用于 settings.voice_intent_local_enabled=true.
-    "local_llm.qwen05b_transformers": (
-        "transformers==4.46.3",
-        "torch==2.5.1",
-        "accelerate==1.2.1",
-    ),
-
     # ─── Speech-to-text providers ──────────────────────────────────────────
     "stt.mistral": ("mistralai==2.4.8",),
     "stt.faster_whisper": (

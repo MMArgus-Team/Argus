@@ -14,11 +14,9 @@ Two probe modes:
   * ``deep=False`` — pure, cheap (config/import/filesystem checks only). Safe
     for CLI use where TCP + preloads are undesirable.
   * ``deep=True`` (default in the gateway) — the pure probes AND:
-      - Auxiliary local-weight presence + one-shot background preload,
       - Bounded TCP CONNECT reachability for every configured LLM endpoint
-        (main / monitor / watcher / memory / embedding / auxiliary.text
-        remote / auxiliary.vision),
-      - `should_use_local_aux_text()` verdict that VoiceAgent consults.
+        (main / monitor / watcher / memory / embedding / auxiliary.vision),
+      - the local OCR backend check.
 
 The report shape is stable (it's a cross-surface contract):
 
@@ -51,8 +49,7 @@ import importlib.util
 import logging
 import os
 import socket
-import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 log = logging.getLogger("hermes.multimodal.readiness")
@@ -184,10 +181,10 @@ def probe_mm_readiness(cfg: Any = None, raw_cfg: Any = None,
     argus config dict (before flattening) — needed for values that live only in
     the nested layout (e.g. ``auxiliary.text.*``, ``auxiliary.vision.base_url``).
 
-    ``deep=True`` runs the extended probes: bounded TCP endpoint reachability,
-    auxiliary local-weight presence, one-shot background preload of the local
-    BitCPM4 model. ``deep=False`` (the default) is pure — safe for CLI /
-    unit-test contexts where we don't want network I/O or heavy imports.
+    ``deep=True`` runs the extended probes: bounded TCP endpoint reachability
+    and the local OCR backend check. ``deep=False`` (the default) is pure —
+    safe for CLI / unit-test contexts where we don't want network I/O or heavy
+    imports.
     """
     caps: List[Dict[str, Any]] = [
         _probe_voice(cfg),
@@ -220,17 +217,6 @@ def _nested(raw_cfg: Any, *path: str) -> Any:
 def _nested_str(raw_cfg: Any, *path: str) -> str:
     v = _nested(raw_cfg, *path)
     return v.strip() if isinstance(v, str) else ""
-
-
-def _nested_bool(raw_cfg: Any, *path: str, default: bool = False) -> bool:
-    v = _nested(raw_cfg, *path)
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    if isinstance(v, str):
-        return v.strip().lower() in ("true", "yes", "1", "on")
-    return default
 
 
 def _cap(key: str, label: str, status: str, *, required: bool,
@@ -290,200 +276,7 @@ def _tcp_reachable(url: str, timeout: float) -> Tuple[bool, str]:
     return False, last_err or "no address reachable"
 
 
-# ── Aux.text local-weight resolution (shared with voice_intent_local) ─────
-
-def _hermes_home() -> str:
-    hh = os.environ.get("ARGUS_HOME")
-    if hh:
-        return hh
-    try:
-        from hermes_constants import get_hermes_home
-        return str(get_hermes_home())
-    except Exception:
-        return os.path.expanduser("~/.argus")
-
-
-def _relative_to_home(path: str) -> str:
-    if not path or os.path.isabs(path):
-        return path
-    return os.path.abspath(os.path.join(_hermes_home(), path))
-
-
-def resolve_aux_text_weights_path(raw_cfg: Any) -> str:
-    """Return absolute weights path iff config.json exists there, else ''.
-    Pure disk probe — no transformers/torch import, no HF hub network."""
-    configured = _nested_str(raw_cfg, "auxiliary", "text",
-                              "local_backend", "local_path")
-    candidates: List[str] = []
-    if configured:
-        candidates.append(_relative_to_home(configured))
-    home = _hermes_home()
-    candidates.append(os.path.join(home, "models", "bitcpm4-0.5b"))
-    candidates.append(os.path.join(home, "weights", "bitcpm4-0.5b"))
-    candidates.append(os.path.abspath("weights/bitcpm4-0.5b"))
-    for c in candidates:
-        try:
-            if c and os.path.isdir(c) and os.path.isfile(os.path.join(c, "config.json")):
-                return c
-        except OSError:
-            continue
-    return ""
-
-
-# ── Preload state (module-global, one-shot per process) ───────────────────
-
-_LOAD_LOCK = threading.Lock()
-_LOAD_STATE: Dict[str, Dict[str, str]] = {
-    "aux_text": {"state": "not_started", "error": ""},
-}
-_LOAD_LISTENERS: Dict[str, List[Callable[[bool, str], None]]] = {"aux_text": []}
-
-
-def _set_load_state(kind: str, state: str, error: str = "") -> None:
-    with _LOAD_LOCK:
-        _LOAD_STATE.setdefault(kind, {})
-        _LOAD_STATE[kind]["state"] = state
-        _LOAD_STATE[kind]["error"] = error
-        listeners = list(_LOAD_LISTENERS.get(kind, []))
-        _LOAD_LISTENERS[kind] = []  # one-shot per registration
-    if state in ("ready", "failed"):
-        for cb in listeners:
-            try:
-                cb(state == "ready", error)
-            except Exception as exc:
-                log.debug("[readiness] load listener err (%s): %s", kind, exc)
-
-
-def observe_aux_text_load(cb: Callable[[bool, str], None]) -> None:
-    """Register a callback that fires ONCE when aux_text load resolves.
-    If already ready/failed, fires immediately with the last outcome."""
-    with _LOAD_LOCK:
-        state = _LOAD_STATE.get("aux_text", {}).get("state", "not_started")
-        error = _LOAD_STATE.get("aux_text", {}).get("error", "")
-        if state == "ready":
-            _fire, args = True, (True, "")
-        elif state == "failed":
-            _fire, args = True, (False, error)
-        else:
-            _fire, args = False, (False, "")
-            _LOAD_LISTENERS.setdefault("aux_text", []).append(cb)
-    if _fire:
-        try:
-            cb(*args)
-        except Exception as exc:
-            log.debug("[readiness] observe cb err: %s", exc)
-
-
-def _kick_aux_text_preload() -> None:
-    with _LOAD_LOCK:
-        state = _LOAD_STATE.get("aux_text", {}).get("state", "not_started")
-        if state in ("loading", "ready"):
-            return
-        _LOAD_STATE["aux_text"]["state"] = "loading"
-        _LOAD_STATE["aux_text"]["error"] = ""
-
-    def _on_done(ok: bool, err: str) -> None:
-        _set_load_state("aux_text", "ready" if ok else "failed", err if not ok else "")
-
-    try:
-        from agent.multimodal.voice_intent_local import ensure_ready_async
-        ensure_ready_async(on_done=_on_done)
-    except Exception as exc:
-        _set_load_state("aux_text", "failed", f"import failed: {exc}")
-
-
-def get_aux_text_state() -> Dict[str, str]:
-    """Peek at current aux_text load state without triggering a load."""
-    with _LOAD_LOCK:
-        s = _LOAD_STATE.get("aux_text", {})
-        return {"state": s.get("state", "not_started"),
-                "error": s.get("error", "")}
-
-
-def should_use_local_aux_text(raw_cfg: Any) -> bool:
-    """Definitive answer for VoiceAgent (and any future caller):
-    'should this session route through the local BitCPM path?'
-    Consolidates use_local=true AND weights present AND load didn't fail.
-    """
-    if not _nested_bool(raw_cfg, "auxiliary", "text", "use_local"):
-        return False
-    if not resolve_aux_text_weights_path(raw_cfg):
-        return False
-    return get_aux_text_state()["state"] != "failed"
-
-
 # ── Deep capability builders ──────────────────────────────────────────────
-
-def _probe_aux_text(cfg: Any, raw_cfg: Any) -> List[Dict[str, Any]]:
-    caps: List[Dict[str, Any]] = []
-    use_local = _nested_bool(raw_cfg, "auxiliary", "text", "use_local")
-    weights_path = resolve_aux_text_weights_path(raw_cfg)
-    weights_present = bool(weights_path)
-
-    if use_local:
-        if weights_present:
-            _kick_aux_text_preload()
-            with _LOAD_LOCK:
-                st = _LOAD_STATE.get("aux_text", {}).get("state", "not_started")
-                err = _LOAD_STATE.get("aux_text", {}).get("error", "")
-            if st == "ready":
-                caps.append(_cap(
-                    "aux_text_local", "本地意图模型 (BitCPM4)", OK,
-                    required=True, weights_path=weights_path))
-            elif st == "failed":
-                caps.append(_cap(
-                    "aux_text_local", "本地意图模型 (BitCPM4)", BROKEN,
-                    required=True,
-                    reason=f"加载失败: {err[:200]}",
-                    fix="检查 transformers/torch 依赖 (uv pip install "
-                        "'transformers==4.46.3' 'torch==2.5.1' 'accelerate==1.2.1'),"
-                        "或改 config.yaml auxiliary.text.use_local=false 切换到远端。",
-                    weights_path=weights_path, error=err))
-            else:
-                caps.append(_cap(
-                    "aux_text_local", "本地意图模型 (BitCPM4)", UNKNOWN,
-                    required=False,
-                    reason=f"加载中 (状态: {st})",
-                    fix="等待加载完成; 若卡在 loading > 30s 请查后台日志。",
-                    weights_path=weights_path))
-        else:
-            caps.append(_cap(
-                "aux_text_local", "本地意图模型 (BitCPM4)", MISSING,
-                required=True,
-                reason="config auxiliary.text.use_local=true 但本地权重缺失。"
-                       "已自动降级到远端,请检查远端可达性 (下方)。",
-                fix="运行 `python download_weights.py` 下载 BitCPM4-0.5B 权重,"
-                    "或改 config.yaml auxiliary.text.use_local=false。"))
-            caps.append(_probe_aux_text_remote(raw_cfg, downgraded=True))
-    else:
-        caps.append(_probe_aux_text_remote(raw_cfg, downgraded=False))
-    return caps
-
-
-def _probe_aux_text_remote(raw_cfg: Any, *, downgraded: bool) -> Dict[str, Any]:
-    base_url = _nested_str(raw_cfg, "auxiliary", "text",
-                            "remote_backend", "base_url")
-    if not base_url:
-        return _cap(
-            "aux_text_endpoint", "文本/意图 远端端点", MISSING,
-            required=True,
-            reason=("本地权重降级后需要远端兜底,但 auxiliary.text.remote_backend.base_url 为空"
-                    if downgraded else
-                    "auxiliary.text.use_local=false 但 remote_backend.base_url 为空"),
-            fix="在 config.yaml 填入 auxiliary.text.remote_backend.base_url/api_key/model,"
-                "或改 use_local=true 并安装本地权重。")
-    ok, reason = _tcp_reachable(base_url, _TCP_DEFAULT_TIMEOUT)
-    if ok:
-        return _cap(
-            "aux_text_endpoint", "文本/意图 远端端点", OK,
-            required=True, url=base_url)
-    return _cap(
-        "aux_text_endpoint", "文本/意图 远端端点", BROKEN,
-        required=True,
-        reason=f"{base_url} 不可达: {reason}",
-        fix="检查 config.yaml auxiliary.text.remote_backend.base_url 或本地服务是否启动。",
-        url=base_url, tcp_error=reason)
-
 
 def _probe_aux_ocr(cfg: Any, raw_cfg: Any) -> List[Dict[str, Any]]:
     """Local rapidocr availability. Remote/cloud VLM OCR was removed — there is
@@ -525,7 +318,6 @@ _ROLE_YAML_PATH: Dict[str, str] = {
     "embedding": "model.embedding.base_url",
     "mm_embedding": "model.mm_embedding.base_url",
     "auxiliary.vision": "auxiliary.vision.base_url",
-    "auxiliary.text": "auxiliary.text.remote_backend.base_url",
 }
 
 
@@ -599,13 +391,6 @@ def _probe_deep_caps(cfg: Any, raw_cfg: Any) -> List[Dict[str, Any]]:
     """Assemble the deep-mode capability list. Failures never raise —
     a probe crash becomes an unknown capability rather than an RPC error."""
     caps: List[Dict[str, Any]] = []
-    try:
-        caps.extend(_probe_aux_text(cfg, raw_cfg))
-    except Exception as exc:
-        log.warning("[readiness] aux_text probe failed: %s", exc, exc_info=True)
-        caps.append(_cap(
-            "aux_text_local", "本地意图模型 (BitCPM4)", UNKNOWN,
-            required=False, reason=f"probe error: {exc}"))
     try:
         caps.extend(_probe_aux_ocr(cfg, raw_cfg))
     except Exception as exc:

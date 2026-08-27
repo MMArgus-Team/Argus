@@ -11667,8 +11667,7 @@ def cmd_dashboard(args):
         # can't strand it — see normalize_config_shapes.
         normalize_config_shapes()
         # Link project weights/ → <ARGUS_HOME>/weights so config.yaml's
-        # ARGUS_HOME-relative model paths (Qwen2.5-0.5B-Instruct, RapidOCR) resolve to
-        # the project's local weights (fetched by download_weights.py).
+        # ARGUS_HOME-relative model paths resolve to the project's local weights.
         sync_project_weights()
     except Exception:
         pass

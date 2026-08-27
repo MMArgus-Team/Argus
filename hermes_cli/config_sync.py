@@ -110,12 +110,11 @@ def normalize_config_shapes() -> bool:
 
 def sync_project_weights() -> bool:
     """Link ``<project>/weights`` → ``<HERMES_HOME>/weights`` so config.yaml's
-    HERMES_HOME-relative paths (e.g. ``weights/qwen2.5-0.5b-instruct``) resolve to the
-    project's local model weights.
+    HERMES_HOME-relative paths resolve to the project's local model weights.
 
-    The project directory holds the real weights (fetched by download_weights.py,
-    not tracked in git); every Argus reader resolves relative model paths under
-    HERMES_HOME. So we link the two. One-way, project → HERMES_HOME.
+    The project directory holds the real weights (not tracked in git); every
+    Argus reader resolves relative model paths under HERMES_HOME. So we link
+    the two. One-way, project → HERMES_HOME.
 
     Link strategy (best-effort, never blocks startup):
       * If <HERMES_HOME>/weights already points at the project weights → no-op.
