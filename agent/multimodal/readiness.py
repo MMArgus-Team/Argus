@@ -16,6 +16,7 @@ Two probe modes:
   * ``deep=True`` (default in the gateway) — the pure probes AND:
       - Bounded TCP CONNECT reachability for every configured LLM endpoint
         (main / monitor / watcher / memory / embedding / auxiliary.vision),
+      - the required ``auxiliary.text.remote_backend`` endpoint,
       - the local OCR backend check.
 
 The report shape is stable (it's a cross-surface contract):
@@ -30,7 +31,7 @@ The report shape is stable (it's a cross-surface contract):
           "required": bool,             # False → optional; won't block `ready`
           "reason": str,                # empty when ok
           "fix": str,                   # empty when ok
-          # optional extras (endpoints[], weights_path, error, url, ...)
+          # optional extras (endpoints[], error, url, ...)
         }, ...
       ],
     }
@@ -83,8 +84,8 @@ def _module_installed(name: str) -> bool:
 
 
 def _cap(key: str, label: str, status: str, *, required: bool,
-         reason: str = "", fix: str = "") -> Dict[str, Any]:
-    return {
+         reason: str = "", fix: str = "", **extra: Any) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {
         "key": key,
         "label": label,
         "status": status,
@@ -92,6 +93,8 @@ def _cap(key: str, label: str, status: str, *, required: bool,
         "reason": reason,
         "fix": fix,
     }
+    entry.update(extra)
+    return entry
 
 
 def _get(cfg: Any, name: str, default: Any = None) -> Any:
@@ -200,7 +203,7 @@ def probe_mm_readiness(cfg: Any = None, raw_cfg: Any = None,
 
 
 # =============================================================================
-# Deep probes: network + preload (run only when deep=True). Everything below
+# Deep probes: network + local package checks (run only when deep=True). Everything below
 # is what used to live in preflight.py — now folded into the one readiness
 # module so there's a single mental model: "MM readiness = this file".
 # =============================================================================
@@ -217,23 +220,6 @@ def _nested(raw_cfg: Any, *path: str) -> Any:
 def _nested_str(raw_cfg: Any, *path: str) -> str:
     v = _nested(raw_cfg, *path)
     return v.strip() if isinstance(v, str) else ""
-
-
-def _cap(key: str, label: str, status: str, *, required: bool,
-         reason: str = "", fix: str = "", **extra: Any) -> Dict[str, Any]:
-    entry: Dict[str, Any] = {
-        "key": key, "label": label, "status": status,
-        "required": required, "reason": reason, "fix": fix,
-    }
-    entry.update(extra)
-    return entry
-
-
-def _module_installed(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError, ModuleNotFoundError):
-        return False
 
 
 def _tcp_reachable(url: str, timeout: float) -> Tuple[bool, str]:
@@ -277,6 +263,34 @@ def _tcp_reachable(url: str, timeout: float) -> Tuple[bool, str]:
 
 
 # ── Deep capability builders ──────────────────────────────────────────────
+
+def _probe_aux_text_remote(raw_cfg: Any) -> Dict[str, Any]:
+    """The voice/text auxiliary path is remote-only and required.
+
+    Keep this as its own capability instead of silently skipping an empty URL:
+    a missing ``base_url`` must make deep readiness actionable.
+    """
+    base_url = _nested_str(
+        raw_cfg, "auxiliary", "text", "remote_backend", "base_url")
+    yaml_path = "auxiliary.text.remote_backend.base_url"
+    if not base_url:
+        return _cap(
+            "aux_text_endpoint", "文本/意图 远端端点", MISSING,
+            required=True,
+            reason=f"{yaml_path} 为空",
+            fix=f"在 config.yaml 配置 {yaml_path}")
+
+    ok, reason = _tcp_reachable(base_url, _TCP_DEFAULT_TIMEOUT)
+    if ok:
+        return _cap(
+            "aux_text_endpoint", "文本/意图 远端端点", OK,
+            required=True, url=base_url)
+    return _cap(
+        "aux_text_endpoint", "文本/意图 远端端点", BROKEN,
+        required=True,
+        reason=f"端点不可达: {reason}",
+        fix=f"检查 config.yaml 的 {yaml_path} 以及对应服务",
+        url=base_url, tcp_error=reason)
 
 def _probe_aux_ocr(cfg: Any, raw_cfg: Any) -> List[Dict[str, Any]]:
     """Local rapidocr availability. Remote/cloud VLM OCR was removed — there is
@@ -391,6 +405,13 @@ def _probe_deep_caps(cfg: Any, raw_cfg: Any) -> List[Dict[str, Any]]:
     """Assemble the deep-mode capability list. Failures never raise —
     a probe crash becomes an unknown capability rather than an RPC error."""
     caps: List[Dict[str, Any]] = []
+    try:
+        caps.append(_probe_aux_text_remote(raw_cfg))
+    except Exception as exc:
+        log.warning("[readiness] auxiliary.text probe failed: %s", exc, exc_info=True)
+        caps.append(_cap(
+            "aux_text_endpoint", "文本/意图 远端端点", UNKNOWN,
+            required=True, reason=f"probe error: {exc}"))
     try:
         caps.extend(_probe_aux_ocr(cfg, raw_cfg))
     except Exception as exc:

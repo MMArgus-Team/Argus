@@ -5191,10 +5191,9 @@ def _resolve_task_provider_model(
 
     if task:
         task_config = _get_auxiliary_task_config(task)
-        # v33: a task may nest its remote endpoint under `remote_backend` (paired
-        # with `use_local`/`local_backend` for a local-model alternative, e.g.
-        # auxiliary.text). Read the endpoint 4-tuple from remote_backend when
-        # present; else fall back to the flat keys directly on the task config.
+        # v33: a task may nest its endpoint under `remote_backend` (for example
+        # auxiliary.text). Read the endpoint tuple there when present; otherwise
+        # fall back to the flat keys directly on the task config.
         _rb = task_config.get("remote_backend")
         _ep = _rb if isinstance(_rb, dict) else task_config
         cfg_provider = str(_ep.get("provider", "")).strip() or None

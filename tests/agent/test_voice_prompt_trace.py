@@ -189,25 +189,3 @@ class TestDisabledByDefault:
             vt.log.handlers = prev
 
         assert cap.lines == [], "the switch must gate the dump entirely"
-
-
-class TestLocalPathDump:
-    def test_local_prompts_are_tagged_local(self, trace_home):
-        cap, _vt = trace_home
-        import agent.multimodal.voice_intent_local as loc
-
-        loc._log_local_prompt(
-            "intent_eou",
-            [{"role": "system", "content": "LOCAL SYSTEM PROMPT"},
-             {"role": "user", "content": "User utterance: 呃"}],
-            "<|im_start|>system\nLOCAL SYSTEM PROMPT<|im_end|>",
-        )
-
-        body = _read(cap)
-        assert "intent_eou.prompt" in body
-        assert 'loc="local"' in body, "local must be distinguishable from remote"
-        assert "LOCAL SYSTEM PROMPT" in body
-        assert "User utterance: 呃" in body
-        # The templated form can differ from system+user; its size is recorded
-        # so a template that dropped something shows up as a mismatch.
-        assert "templated_chars=" in body

@@ -23,7 +23,6 @@ from typing import Any, Callable, Optional, List
 
 from agent.multimodal.voice_agent_context import (
     build_world_snapshot,
-    judge_intent_eou_local,
     judge_intent_eou_remote,
     phrase_utterance,
 )
@@ -116,14 +115,14 @@ class VoiceAgent:
         # 会话忙判定 (可选): 主 Agent 是否 running (影响作业提交时序)
         is_session_busy: Optional[Callable[[], bool]] = None,
         # Voice 专用远端 LLM：拟词、是否开口、self/main_agent 分诊。
-        # Gateway 当前与 intent_client 注入同一个 auxiliary.voice_intent client。
+        # Gateway 当前与 intent_client 注入同一个 auxiliary.text.remote_backend client。
         aux_client: Any = None,
         aux_model: str = "",
-        # 层3 意图分类 LLM (config auxiliary.voice_intent). 如果 None →
+        # 层3 意图分类 LLM (config auxiliary.text.remote_backend). 如果 None →
         # 只走层2规则过滤; 有 client 则规则放行的还要过一遍 LLM 判 "是否在跟我说话".
         intent_client: Any = None,
         intent_model: str = "",
-        # 配置读取 (settings.voice_interact_* 那组)
+        # 配置读取 (interaction.voice_* 那组)
         cfg: Optional[dict] = None,
         emit_cb: Optional[Callable[[str, dict], None]] = None,
     ) -> None:
@@ -137,14 +136,10 @@ class VoiceAgent:
         self._intent_client = intent_client
         self._intent_model = intent_model
         self._emit_cb = emit_cb
-        # 接收【完整 config】; interaction 段 (voice_* 扁平) + auxiliary.text 都要读。
+        # 接收【完整 config】; 本类读取 interaction 段的 voice_* 行为配置。
         self._cfg = cfg or {}
-        # 缓存常用子节点。★ v33: voice_* 在顶层 interaction 段; 文本改写/意图分类端点
-        #   在 auxiliary.text (含 use_local + local_backend + remote_backend)。
+        # 缓存常用子节点。文本改写/意图分类使用调用方传入的远端 client/model。
         self._settings: dict = self._cfg.get("interaction") or {}
-        self._aux_voice_intent: dict = (
-            (self._cfg.get("auxiliary") or {}).get("text") or {}
-        )
         # 层2 dedup 用: 上一句被处理的用户话 + 时间戳
         self._last_user_text: str = ""
         self._last_user_ts: float = 0.0
@@ -368,7 +363,7 @@ class VoiceAgent:
         return None
 
     async def _admit_user_with_intent_check(self, text: str) -> None:
-        """EOU 拼接状态机入口 (本地/远端统一逻辑):
+        """使用远端意图模型的 EOU 拼接状态机入口:
 
         1) 若当前是【监听中】(_eou_listening=True):
              → 直接追加 buffer，(重)置超时，不调 LLM。
@@ -378,13 +373,8 @@ class VoiceAgent:
                speak_to_me=true, is_end=true → 打断TTS + 直接 flush
                speak_to_me=true, is_end=false → 打断TTS + 进入监听中 + 追加 + 置超时
 
-        本地模式 (use_local=true): LLM=本地 BitCPM，超时 1.5s
-        远端模式 (use_local=false): LLM=远端 deepseek，超时 2s
-
-        EOU 始终开启，无关闭开关。两种模式都走同一套状态机。
+        EOU 始终开启，无关闭开关；远端失败时保守放行并视为完整语句。
         """
-        use_local = bool(self._aux_voice_intent.get("use_local", False))
-
         # ── 监听中: 直接追加，不调 LLM ──────────────────────────────────────
         if self._eou_listening:
             self._eou_buffer.append(text.strip())
@@ -397,7 +387,7 @@ class VoiceAgent:
                 self._flush_eou_buffer()
                 return
             # 每次新段进来都重置超时 (从本次算起)
-            self._arm_eou_timer(use_local=use_local)
+            self._arm_eou_timer()
             return
 
         # ── 非监听中: 调 LLM 判意图 + EOU ────────────────────────────────────
@@ -406,21 +396,13 @@ class VoiceAgent:
         if silence < 15.0 and self._self_recent:
             hint = f"助手刚说过: {self._self_recent[-1][:60]}"
 
-        if use_local:
-            r = await judge_intent_eou_local(text, hint)   # 纯本地, 兜底 {True, True}
-            speak_to_me = bool(r.get("speak_to_me", True))
-            is_end = bool(r.get("is_end", True))
-        else:
-            # ★ 远端也【真正判 is_end】(合并一次调用出 {speak_to_me, is_end}),
-            #   与本地同逻辑, 不再硬编码 is_end=True。超时/失败兜底 {True, True}
-            #   (保守放行 + 当说完, 剩下交给监听超时机制 2s 兜底 flush)。
-            timeout = float(self._settings.get("voice_intent_check_timeout_sec", 2.0))
-            r = await judge_intent_eou_remote(
-                client=self._intent_client, model=self._intent_model,
-                user_text=text, hint=hint, timeout_sec=timeout,
-            )
-            speak_to_me = bool(r.get("speak_to_me", True))
-            is_end = bool(r.get("is_end", True))
+        timeout = float(self._settings.get("voice_intent_check_timeout_sec", 2.0))
+        r = await judge_intent_eou_remote(
+            client=self._intent_client, model=self._intent_model,
+            user_text=text, hint=hint, timeout_sec=timeout,
+        )
+        speak_to_me = bool(r.get("speak_to_me", True))
+        is_end = bool(r.get("is_end", True))
 
         if not speak_to_me:
             log.info("[voice] EOU drop: not_addressed | text=%r", text[:60])
@@ -442,7 +424,7 @@ class VoiceAgent:
             # is_end=false → 进入监听中, 置超时
             self._eou_listening = True
             log.info("[voice] EOU is_end=false → entering listening state")
-            self._arm_eou_timer(use_local=use_local)
+            self._arm_eou_timer()
 
     def _notify_buffer_updated(self) -> None:
         """通知 gateway 侧当前 buffer 内容已更新 (供前端显示已拼接段)。
@@ -454,14 +436,12 @@ class VoiceAgent:
             except Exception as exc:
                 log.debug("[voice] eou_buffer_cb err: %s", exc)
 
-    def _arm_eou_timer(self, *, use_local: bool = True) -> None:
-        """(重)设监听中超时: 超时无新话 → 强制 flush。
-        本地 1.5s / 远端 2s。每次新 final 到来都重置。"""
+    def _arm_eou_timer(self) -> None:
+        """(重)设监听中超时；每次新 final 到来都重置。"""
         self._cancel_eou_timer()
         if self._loop is None:
             return
-        delay_key = "voice_eou_timeout_sec" if use_local else "voice_eou_remote_timeout_sec"
-        delay = float(self._settings.get(delay_key, 1.5 if use_local else 2.0))
+        delay = float(self._settings.get("voice_eou_remote_timeout_sec", 2.0))
         def _fire():
             self._eou_timer = None
             if self._eou_buffer:

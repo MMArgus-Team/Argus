@@ -4,7 +4,7 @@
   build_world_snapshot 拉四源: recent_dialogue / trigger_event / voice_last_2 / silence_sec
   Voice 专用 LLM 调用: judge_addressed (是否在跟我说话) / decide_route
   (self 直答或 main_agent 委派) / decide_speak (要不要说) / phrase_utterance
-  (口播拟词)。Gateway 将它们统一路由到 auxiliary.voice_intent。
+  (口播拟词)。Gateway 将它们统一路由到 auxiliary.text.remote_backend。
 
 设计原则:
 - LLM 调用超时严守 (拟词是热路径, 超时兜底走原文, 不卡口播).
@@ -585,6 +585,19 @@ Use the context hint only to decide whether the utterance continues the assistan
 Output JSON only:
 {"addressed": true, "reason": "brief reason"}"""
 
+_INTENT_EOU_SYSTEM = """Classify one ASR-transcribed utterance for a voice assistant. The utterance may be in any language. Make both decisions and output JSON only.
+
+1. speak_to_me: whether the utterance is addressed to the AI voice assistant.
+- true for a question, command, greeting, casual conversation with the assistant, or a continuation of the preceding assistant dialogue.
+- false for television or background speech, conversation between other people, self-talk, meaningless filler, or an isolated sound or word not directed at the assistant.
+
+2. is_end: whether the utterance is semantically complete and ready to process.
+- true when it expresses a complete meaning, question, or instruction, even if informal.
+- false when it is clearly unfinished, suspended, or only the beginning of a request.
+
+Output exactly one JSON object with no explanation:
+{"speak_to_me": true, "is_end": true}"""
+
 
 async def judge_addressed_to_me(
     *,
@@ -593,21 +606,17 @@ async def judge_addressed_to_me(
     user_text: str,
     context_hint: str = "",
     timeout_sec: float = 1.5,
-    use_local: bool = True,
 ) -> Optional[bool]:
     """层3 前置分类: 这句 ASR final 是不是在跟 VoiceAgent 说话.
 
-    双层策略:
-      1) 本地 Qwen2.5-0.5B (毫秒级, 无网络) → 判决明确就返回
-      2) 本地未装/未加载完/判决模糊 → fallback 远端 aux LLM
+    使用 ``auxiliary.text.remote_backend`` 对应的远端 aux LLM。
 
     Args:
-        client: AsyncOpenAI 客户端 (来自 auxiliary.voice_intent 端点)
+        client: AsyncOpenAI 客户端 (来自 auxiliary.text.remote_backend)
         model: 远端模型名
         user_text: ASR final 文本
         context_hint: 可选的对话上下文提示 (如 "刚刚助手说了 xxx", 帮 LLM 判断延续)
         timeout_sec: 远端超时秒 (超时 → 返回 None, 调用方兜底放行)
-        use_local: 是否优先用本地 Qwen2.5-0.5B (config voice_intent_local_enabled)
     Returns:
         True  = 是在跟我说话, 应处理
         False = 不是, 应丢弃
@@ -616,7 +625,6 @@ async def judge_addressed_to_me(
     if not user_text:
         return None
     _in = {"user_text": user_text, "hint": context_hint}
-    # ── 远端 fallback ──
     if client is None or not model or not user_text:
         return None
     payload = f"User utterance: {user_text}"
@@ -662,50 +670,15 @@ async def judge_addressed_to_me(
     return result
 
 
-async def judge_intent_eou_local(user_text: str, hint: str = "") -> dict:
-    """意图 + 语义 EOU 【合并成一次本地调用】(纯本地 BitCPM4-0.5B, 不 fallback 远端)。
-
-    返回 {"speak_to_me": bool, "is_end": bool}。
-    本地未加载完 / 解析失败 → 保守兜底 {"speak_to_me": True, "is_end": True}
-      (纯本地策略: 宁可当作"跟我说的完整一句"照常处理, 也不吞用户话 / 不拖死拼接)。
-    """
-    _in = {"user_text": user_text, "hint": hint}
-    _t0 = time.monotonic()
-    if not user_text or not user_text.strip():
-        return {"speak_to_me": False, "is_end": True}
-    try:
-        from agent.multimodal.voice_intent_local import judge_addressed_and_eou
-        # 本地推理 CPU 阻塞 → 挪出 event loop
-        r = await asyncio.to_thread(judge_addressed_and_eou, user_text, hint)
-    except Exception as exc:
-        log.debug("[voice.intent_eou] local err: %s", exc)
-        r = None
-    _ms = (time.monotonic() - _t0) * 1000.0
-    if r is None:
-        # 兜底: 当作跟我说的完整一句
-        out = {"speak_to_me": True, "is_end": True}
-        _va_llm_log("intent_eou", loc="local", ok=False, ms=_ms,
-                    payload_in=_in, out=out, err="local_none_fallback_true")
-        return out
-    log.info("[voice.intent_eou] speak_to_me=%s is_end=%s",
-             r["speak_to_me"], r["is_end"])
-    _va_llm_log("intent_eou", loc="local", ok=True, ms=_ms,
-                payload_in=_in, out=r)
-    return r
-
-
 async def judge_intent_eou_remote(
     *, client: Any, model: str, user_text: str, hint: str = "",
     timeout_sec: float = 2.0,
 ) -> dict:
-    """意图 + 语义 EOU 【合并成一次远端调用】(与本地 judge_intent_eou_local 同契约)。
-
-    远端也要真正判 is_end (不再硬编码 True), 用与本地相同的 _INTENT_EOU_SYSTEM
-    prompt 让远端 LLM 一次输出 {speak_to_me, is_end}。
+    """用远端 aux LLM 一次判断意图和语义 EOU。
 
     返回 {"speak_to_me": bool, "is_end": bool}。
     超时 / 解析失败 / 无 client → 保守兜底 {"speak_to_me": True, "is_end": True}
-      (与本地一致: 宁误接不误拒 + 当作说完, 剩下交给监听超时兜底 flush)。
+      (宁误接不误拒 + 当作说完, 剩下交给监听超时兜底 flush)。
     """
     _in = {"user_text": user_text, "hint": hint}
     _t0 = time.monotonic()
@@ -718,7 +691,6 @@ async def judge_intent_eou_remote(
         _va_llm_log("intent_eou", loc="remote", ok=False, ms=_ms(),
                     payload_in=_in, out=_fallback, err="no_client")
         return _fallback
-    from agent.multimodal.voice_intent_local import _INTENT_EOU_SYSTEM
     payload = f"User utterance: {user_text}"
     if hint:
         payload += f"\nContext hint: {hint}"
@@ -770,9 +742,9 @@ def _va_llm_log(
     """统一的 VoiceAgent LLM 调用日志 (单行 key=value, 易解析).
 
     格式 (一行):
-      [VA_LLM] call=<名> loc=<remote|local> ok=<0|1> ms=<耗时> in=<json串> out=<json串> err=<json串>
+      [VA_LLM] call=<名> loc=remote ok=<0|1> ms=<耗时> in=<json串> out=<json串> err=<json串>
     - call: decide_route / decide_speak / phrase / intent (调用点名)
-    - loc:  remote (远端 aux LLM) / local (本地 Qwen2.5-0.5B)
+    - loc:  remote (远端 aux LLM)
     - ok:   1=成功拿到可用结果, 0=超时/报错/解析失败/空
     - ms:   本次调用耗时 (毫秒, 含网络/推理)
     - in:   完整输入 payload (json.dumps → 一行内, 转义安全, 不破坏单行解析)

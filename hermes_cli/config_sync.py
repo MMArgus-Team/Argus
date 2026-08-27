@@ -14,10 +14,7 @@ inherits HERMES_HOME) see the latest project config.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -25,7 +22,6 @@ logger = logging.getLogger(__name__)
 # Project root = parent of hermes_cli/ (this file lives in hermes_cli/).
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PROJECT_CONFIG = _PROJECT_ROOT / "config.yaml"
-_PROJECT_WEIGHTS = _PROJECT_ROOT / "weights"
 
 
 def sync_project_config() -> bool:
@@ -109,84 +105,4 @@ def normalize_config_shapes() -> bool:
         return True
     except Exception as exc:  # pragma: no cover - best-effort
         logger.warning("[config-normalize] failed (non-fatal): %s", exc)
-        return False
-
-
-def sync_project_weights() -> bool:
-    """Link ``<project>/weights`` → ``<HERMES_HOME>/weights`` so config.yaml's
-    HERMES_HOME-relative paths resolve to the project's local model weights.
-
-    The project directory holds the real weights (not tracked in git); every
-    Argus reader resolves relative model paths under HERMES_HOME. So we link
-    the two. One-way, project → HERMES_HOME.
-
-    Link strategy (best-effort, never blocks startup):
-      * If <HERMES_HOME>/weights already points at the project weights → no-op.
-      * A real directory already there (not our link) → leave it, warn (don't
-        clobber user data).
-      * Otherwise create a link: symlink first; on Windows without symlink
-        permission, fall back to a directory junction (mklink /J).
-
-    Returns True when a usable link/target is in place, False otherwise.
-    """
-    try:
-        src = _PROJECT_WEIGHTS
-        if not src.is_dir():
-            logger.debug("[weights-sync] no project weights at %s; skip", src)
-            return False
-        from hermes_cli.config import ensure_hermes_home, get_hermes_home
-
-        ensure_hermes_home()
-        home = Path(get_hermes_home())
-        dst = home / "weights"
-
-        # src == dst (HERMES_HOME is the project dir) → nothing to link.
-        try:
-            if dst.resolve() == src.resolve():
-                logger.debug("[weights-sync] src == dst (%s); skip", dst)
-                return True
-        except Exception:
-            pass
-
-        # Already linked to our project weights?
-        if dst.exists() or dst.is_symlink():
-            try:
-                if dst.is_symlink() and Path(os.readlink(dst)).resolve() == src.resolve():
-                    return True
-            except Exception:
-                pass
-            try:
-                if dst.resolve() == src.resolve():
-                    return True   # junction / already resolves to project
-            except Exception:
-                pass
-            # A different real directory is there → don't clobber it.
-            logger.warning(
-                "[weights-sync] %s already exists and isn't the project weights link; "
-                "leaving it. config.yaml relative model paths may not resolve to "
-                "project weights.", dst)
-            return False
-
-        home.mkdir(parents=True, exist_ok=True)
-        # Try a symlink first (works on macOS/Linux, and Windows w/ dev mode).
-        try:
-            os.symlink(str(src), str(dst), target_is_directory=True)
-            logger.info("[weights-sync] symlink %s → %s", dst, src)
-            return True
-        except (OSError, NotImplementedError) as exc:
-            if sys.platform != "win32":
-                logger.warning("[weights-sync] symlink failed (non-fatal): %s", exc)
-                return False
-        # Windows fallback: directory junction (no admin/dev-mode needed).
-        try:
-            subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(dst), str(src)],
-                check=True, capture_output=True, text=True)
-            logger.info("[weights-sync] junction %s → %s", dst, src)
-            return True
-        except Exception as exc:
-            logger.warning("[weights-sync] junction failed (non-fatal): %s", exc)
-            return False
-    except Exception as exc:  # pragma: no cover - best-effort
-        logger.warning("[weights-sync] failed (non-fatal): %s", exc)
         return False

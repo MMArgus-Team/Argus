@@ -341,6 +341,5 @@ interaction:
   voice_intent_check_timeout_sec: 2.0     # LLM 超时 → 兜底放行
   voice_intent_context_recent_ms: 15000   # 距上次对话 < 此 ms → 大概率延续, 可跳过
   # EOU 拼接状态机 (始终开启, 无关闭开关)。
-  voice_eou_timeout_sec: 1.5              # 本地模式: 监听中超时强制 flush (秒)
-  voice_eou_remote_timeout_sec: 2.0       # 远端模式: 监听中超时强制 flush (秒)
+  voice_eou_remote_timeout_sec: 2.0       # 远端意图判断: 监听中超时强制 flush (秒)
   voice_eou_max_buffer_segs: 5            # 最多拼几段 (防无限拼接)
