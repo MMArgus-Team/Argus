@@ -247,9 +247,10 @@ class BackendRecallProxy:
 class BackendQueryOCRProxy:
     """Loop-safe facade for MemoryBackend's long-lived OCR worker.
 
-    The OCR client (and a remote client's AsyncOpenAI transport) is constructed
-    on the MemoryBackend loop.  QueryWorker runs on the Watcher loop, so the
-    collection coroutine must be marshalled back to its owner just like Recall.
+    The OCR client (local RapidOCR — the only OCR backend; remote VLM OCR was
+    removed) is constructed on the MemoryBackend loop.  QueryWorker runs on the
+    Watcher loop, so the collection coroutine must be marshalled back to its
+    owner just like Recall.
     """
 
     def __init__(self, memory_backend: Any):
@@ -2137,7 +2138,7 @@ class WatcherAgent:
             ocr_started = time.time()
             try:
                 total_ocr_timeout = max(0.1, float(
-                    getattr(self.cfg, "ocr_timeout_sec", 4.0) or 4.0))
+                    getattr(self.cfg, "ocr_timeout_sec", 8.0) or 8.0))
                 (query_ocr_evidence, ocr_evidence_state,
                  ocr_evidence_reason) = await asyncio.wait_for(
                     _collect_query_ocr(ask_frames, effective_ask_ts),
@@ -2445,7 +2446,7 @@ class WatcherAgent:
                         ocr_timeout = max(0.1, min(
                             remaining,
                             float(getattr(
-                                self.cfg, "ocr_timeout_sec", 4.0) or 4.0)
+                                self.cfg, "ocr_timeout_sec", 8.0) or 8.0)
                             + 0.25,
                         ))
                         query_ocr_evidence = list(await asyncio.wait_for(
@@ -3478,18 +3479,15 @@ class WatcherAgent:
                                 # Confirmation consumes no analysis segment.
                                 round_idx -= 1
                                 try:
-                                    _df.append_note(
-                                        rid,
-                                        "Watcher completion confirmed after a "
-                                        f"static-tail visual check #{attempts_done + 1} "
-                                        f"(confidence="
-                                        f"{confidence:.2f}): "
-                                        + (confirm_reason or str(
+                                    log.info(
+                                        "[watcher] %s: completion confirmed after a "
+                                        "static-tail visual check #%d (confidence=%.2f): %s%s",
+                                        rid, attempts_done + 1, confidence,
+                                        confirm_reason or str(
                                             pending_completion_candidate.get(
-                                                "reason") or "confirmed"))
-                                        + ((" | final observation: "
-                                            + confirm_observation)
-                                           if confirm_observation else ""),
+                                                "reason") or "confirmed"),
+                                        (f" | final observation: {confirm_observation}"
+                                         if confirm_observation else ""),
                                     )
                                 except Exception:
                                     pass
@@ -3519,15 +3517,12 @@ class WatcherAgent:
                                         previous_raw_ts),
                                 })
                                 try:
-                                    _df.append_note(
-                                        rid,
-                                        "Watcher completion check "
-                                        f"{attempt_no}/{max_attempts} was "
+                                    log.info(
+                                        "[watcher] %s: completion check %d/%d "
                                         "inconclusive; preserving the candidate "
-                                        "for an extended static-tail follow-up: "
-                                        + (confirm_reason or
-                                           "insufficient evidence"),
-                                    )
+                                        "for an extended static-tail follow-up: %s",
+                                        rid, attempt_no, max_attempts,
+                                        confirm_reason or "insufficient evidence")
                                 except Exception:
                                     pass
                                 # This loop iteration performed no analysis
@@ -3536,13 +3531,12 @@ class WatcherAgent:
                                 continue
 
                             try:
-                                _df.append_note(
-                                    rid,
-                                    "Watcher completion candidate was not "
-                                    f"confirmed after {attempt_no} check(s) "
-                                    f"(confidence={confidence:.2f}): "
-                                    + (confirm_reason or "insufficient evidence"),
-                                )
+                                log.info(
+                                    "[watcher] %s: completion candidate was not "
+                                    "confirmed after %d check(s) "
+                                    "(confidence=%.2f): %s",
+                                    rid, attempt_no, confidence,
+                                    confirm_reason or "insufficient evidence")
                             except Exception:
                                 pass
                             pending_completion_candidate = None
@@ -3597,13 +3591,12 @@ class WatcherAgent:
                                          if _is_first else _gather(cursor_ts))
                                 continue
                             try:
-                                _df.append_note(
-                                    rid,
-                                    "Finite-task static tail reached "
-                                    f"{static_tail_flush_sec:.1f}s; starting a "
-                                    "before/after raw-frame completion check "
-                                    f"before the normal {ttl_sec:.0f}s segment TTL.",
-                                )
+                                log.info(
+                                    "[watcher] %s: finite-task static tail reached "
+                                    "%.1fs; starting a before/after raw-frame "
+                                    "completion check before the normal %.0fs "
+                                    "segment TTL.",
+                                    rid, static_tail_flush_sec, ttl_sec)
                             except Exception:
                                 pass
                             if emit is not None:
@@ -3621,9 +3614,10 @@ class WatcherAgent:
                             break
                         _remain = max(0.0, ttl_sec - _elapsed())
                         try:
-                            _df.append_note(
-                                rid, f"攒帧中… (第{_wait_seg}段, 帧 {len(fresh)}/{target_frames}, "
-                                     f"ttl 余 {_remain:.0f}s)")
+                            log.info(
+                                "[watcher] %s: 攒帧中… (第%d段, 帧 %d/%d, "
+                                "ttl 余 %.0fs)",
+                                rid, _wait_seg, len(fresh), target_frames, _remain)
                         except Exception:
                             pass
                         if emit is not None:
@@ -3740,13 +3734,11 @@ class WatcherAgent:
                                 confirm_observation or confirm_reason or
                                 "The video reached its ended state.")
                             try:
-                                _df.append_note(
-                                    rid,
-                                    "Watcher completion confirmed by the "
+                                log.info(
+                                    "[watcher] %s: completion confirmed by the "
                                     "before/after static-boundary check "
-                                    f"(confidence={confidence:.2f}): "
-                                    + (confirm_reason or "confirmed"),
-                                )
+                                    "(confidence=%.2f): %s",
+                                    rid, confidence, confirm_reason or "confirmed")
                             except Exception:
                                 pass
                             if emit is not None:
@@ -3765,14 +3757,12 @@ class WatcherAgent:
 
                         static_tail_checked_anchor_ts = anchor_ts
                         try:
-                            _df.append_note(
+                            log.info(
+                                "[watcher] %s: static-boundary completion check "
+                                "was not confirmed; waiting for a novel scene "
+                                "before re-arming: %s",
                                 rid,
-                                "Static-boundary completion check was not "
-                                "confirmed; waiting for a novel scene before "
-                                "re-arming: "
-                                + (confirm_reason or
-                                   "insufficient visual ending evidence"),
-                            )
+                                confirm_reason or "insufficient visual ending evidence")
                         except Exception:
                             pass
                         # The dedicated verifier already judged this boundary.
@@ -3850,7 +3840,9 @@ class WatcherAgent:
                 if not fresh and source_live_at_start and not _ended():
                     no_progress += 1
                     try:
-                        _df.append_note(rid, f"本 ttl 周期({ttl_sec:.0f}s)内无新画面, 跳过本轮继续等。")
+                        log.info(
+                            "[watcher] %s: 本 ttl 周期(%.0fs)内无新画面, 跳过本轮继续等。",
+                            rid, ttl_sec)
                     except Exception:
                         pass
                     # A skipped (no-frame) cycle must not consume a real round number
@@ -3864,8 +3856,9 @@ class WatcherAgent:
                     _before = len(fresh)
                     fresh = _even_downsample(fresh, target_frames)
                     try:
-                        _df.append_note(
-                            rid, f"拥塞: 积压 {_before} 帧 → 等间隔降采样到 {len(fresh)} 帧。")
+                        log.info(
+                            "[watcher] %s: 拥塞: 积压 %d 帧 → 等间隔降采样到 %d 帧。",
+                            rid, _before, len(fresh))
                     except Exception:
                         pass
 
@@ -4048,12 +4041,10 @@ class WatcherAgent:
                         stop_reason = "task_complete"
                         completion_candidate = False
                         try:
-                            _df.append_note(
-                                rid,
-                                "Watcher accepted exact end-progress equality "
-                                "as conclusive completion without an additional "
-                                "visual confirmation call.",
-                            )
+                            log.info(
+                                "[watcher] %s: accepted exact end-progress "
+                                "equality as conclusive completion without an "
+                                "additional visual confirmation call.", rid)
                         except Exception:
                             pass
 
@@ -4078,24 +4069,21 @@ class WatcherAgent:
                         "last_confirm_raw_ts": None,
                     }
                     try:
-                        _df.append_note(
-                            rid,
-                            "Watcher marked a possible completion state; waiting "
-                            "for the no-new-scene grace period before visual "
-                            "confirmation: "
-                            + (completion_candidate_reason or "unspecified cue"),
-                        )
+                        log.info(
+                            "[watcher] %s: marked a possible completion state; "
+                            "waiting for the no-new-scene grace period before "
+                            "visual confirmation: %s",
+                            rid, completion_candidate_reason or "unspecified cue")
                     except Exception:
                         pass
 
                 if task_done:
                     stop_reason = "task_complete"
                     try:
-                        _df.append_note(
-                            rid,
-                            "Watcher observed the task completion condition: "
-                            + (task_done_reason or "confirmed by the current segment"),
-                        )
+                        log.info(
+                            "[watcher] %s: observed the task completion "
+                            "condition: %s",
+                            rid, task_done_reason or "confirmed by the current segment")
                     except Exception:
                         pass
                     break

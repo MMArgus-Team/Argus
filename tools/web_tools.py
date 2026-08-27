@@ -111,10 +111,10 @@ logger = logging.getLogger(__name__)
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _env_value(name: str) -> str:
-    """Resolve ``name`` via Hermes config-aware env, falling back to process env.
+    """Resolve ``name`` via Argus config-aware env, falling back to process env.
 
     Mirrors the SearXNG provider's ``_searxng_url()`` so that values set
-    through Hermes' config/.env layer (``argus config set``, ``argus tools``)
+    through Argus' config/.env layer (``argus config set``, ``argus tools``)
     are honored here too — not just raw process-env exports. Without this,
     a config-only ``SEARXNG_URL`` (or any provider key) leaves the backend
     auto-detect cascade and ``check_web_api_key()`` blind to it. See #34290.

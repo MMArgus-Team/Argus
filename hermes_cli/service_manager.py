@@ -630,8 +630,8 @@ class S6ServiceManager:
         """Generate the run script for a profile-gateway s6 service.
 
         The script:
-          1. Sources HERMES_HOME (and any extra env) via with-contenv —
-             so e.g. ``-e HERMES_HOME=/data/hermes`` is honored at run
+          1. Sources ARGUS_HOME (and any extra env) via with-contenv —
+             so e.g. ``-e ARGUS_HOME=/data/hermes`` is honored at run
              time, not Python-substituted at registration time (OQ8-C).
           2. Resets ``HOME`` to ``/opt/data`` before the privilege drop
              so with-contenv's root HOME does not leak into the
@@ -739,10 +739,10 @@ class S6ServiceManager:
     def _render_log_run(profile: str) -> str:
         """Generate the log/run script for a profile-gateway service.
 
-        OQ8-C: persist to ``${HERMES_HOME}/logs/gateways/<profile>/``.
-        CRITICAL: the HERMES_HOME path is sourced from the runtime env
+        OQ8-C: persist to ``${ARGUS_HOME}/logs/gateways/<profile>/``.
+        CRITICAL: the ARGUS_HOME path is sourced from the runtime env
         via with-contenv — NOT Python-substituted at registration time
-        — so a container started with ``-e HERMES_HOME=/data/hermes``
+        — so a container started with ``-e ARGUS_HOME=/data/hermes``
         gets its logs under /data/hermes/logs/..., not the build-time
         default.
 
@@ -783,8 +783,8 @@ class S6ServiceManager:
         return (
             f"#!/command/with-contenv sh\n"
             f"# shellcheck shell=sh\n"
-            f': "${{HERMES_HOME:=/opt/data}}"\n'
-            f'log_dir="$HERMES_HOME/logs/gateways/{prof}"\n'
+            f': "${{ARGUS_HOME:=/opt/data}}"\n'
+            f'log_dir="$ARGUS_HOME/logs/gateways/{prof}"\n'
             f'mkdir -p "$log_dir"\n'
             # The gateways/ parent must be chowned too (non-recursively):
             # `mkdir -p` creates it root-owned on a root-context boot, and a
@@ -794,7 +794,7 @@ class S6ServiceManager:
             # root-context boot, so it also heals volumes already poisoned
             # by older images. Non-recursive on purpose: sibling profile
             # dirs are each managed by their own log/run. See #45258.
-            f'chown hermes:hermes "$HERMES_HOME/logs/gateways" 2>/dev/null || true\n'
+            f'chown hermes:hermes "$ARGUS_HOME/logs/gateways" 2>/dev/null || true\n'
             f'chown -R hermes:hermes "$log_dir" 2>/dev/null || true\n'
             f'rm -f "$log_dir/lock"\n'
             # Skip the drop when already non-root (CAP_SETGID).

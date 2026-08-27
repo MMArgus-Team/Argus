@@ -355,19 +355,19 @@ def _scan_gateway_pids(
             return (
                 f"--profile {current_profile_name_lc}" in command_lc
                 or f"-p {current_profile_name_lc}" in command_lc
-                or f"hermes_home={current_home_lc}" in command_lc
+                or f"argus_home={current_home_lc}" in command_lc
             )
 
         # Default-profile case: no profile flag in argv. Accept as long as
-        # the command doesn't advertise *some other* profile. HERMES_HOME
+        # the command doesn't advertise *some other* profile. ARGUS_HOME
         # may be passed via env (not visible in wmic/CIM command line) so
         # its absence is NOT disqualifying — only a non-matching explicit
-        # HERMES_HOME= in argv is.
+        # ARGUS_HOME= in argv is.
         if "--profile " in command_lc or " -p " in command_lc:
             return False
         if (
-            "hermes_home=" in command_lc
-            and f"hermes_home={current_home_lc}" not in command_lc
+            "argus_home=" in command_lc
+            and f"argus_home={current_home_lc}" not in command_lc
         ):
             return False
         return True
@@ -2872,16 +2872,16 @@ def _temp_home_in_service_definition(definition: str) -> str | None:
 
 
 def _refuse_temp_home_service_write(definition: str, kind: str) -> bool:
-    """Refuse (with guidance) when a service definition carries a temp HERMES_HOME."""
+    """Refuse (with guidance) when a service definition carries a temp ARGUS_HOME."""
     temp_home = _temp_home_in_service_definition(definition)
     if temp_home is None:
         return False
     print(
-        f"✗ Refusing to write the gateway {kind}: HERMES_HOME resolves to a "
+        f"✗ Refusing to write the gateway {kind}: ARGUS_HOME resolves to a "
         f"temporary directory ({temp_home})."
     )
     print(
-        "  This usually means a test/E2E environment exported HERMES_HOME. "
+        "  This usually means a test/E2E environment exported ARGUS_HOME. "
         "Unset it (or run from a clean shell) and retry."
     )
     return True

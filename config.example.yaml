@@ -1,77 +1,38 @@
 _config_version: 33
 
-# Per-HTTP-call LLM request timeout (s), shared by the main agent + every
-# multimodal submodule. Per-provider/model overrides still win over this.
+# 每次 HTTP 调用的 LLM 超时 (秒)。按 provider/model 的覆盖优先级更高。
 llm_timeout_seconds: 120
 
-# ╔══════════════════════════════════════════════════════════════════════╗
-# ║ Argus config — PROJECT SOURCE OF TRUTH (git-tracked).                ║
-# ║ At `hermes dashboard` startup this is copied over <HERMES_HOME>/      ║
-# ║ config.yaml (project wins). Edit HERE, then restart.                 ║
-# ║ Single source of truth for all keys / endpoints / models / knobs.    ║
-# ║ Each multimodal submodule aggregates endpoint + behavior under        ║
-# ║ model.<role>. A mistyped/mis-nested key is WARNED at startup          ║
-# ║ ("[config] unknown ... IGNORED"), never silently dropped.            ║
-# ║ Contains plaintext API keys by project choice.                       ║
-# ╚══════════════════════════════════════════════════════════════════════╝
+# ═══════════════════════════════════════════════════════════════════════
+# Argus 配置（项目内 git 跟踪的单一事实源）。
+# dashboard/gateway 启动时会把本项目 config.yaml 复制到 <HERMES_HOME>/config.yaml。
+# 改这里后重启生效。含明文 API key（项目约定）。
+# ═══════════════════════════════════════════════════════════════════════
 
-# fallback_model (optional): automatic failover when the primary is down.
+# fallback_model (可选): 主模型不可用时自动切换。
 # fallback_model:
 #   provider: openrouter
 #   model: anthropic/claude-sonnet-4
 
-
 # ═══════════════════════════════════════════════════════════════════════
-# MODELS — every submodule's model is independently configurable.
+# MODELS — 主 agent 在 model: 顶层 (default/provider/base_url/api_key/supports_vision)。
+# 各多模态子模块是并列的 4 元组 {provider, base_url, api_key, model}:
+#   monitor (always-on 监控) · watcher (深研) · memory (分层记忆) · embedding · ocr
+# 统一约定: base_url 空 → 跟随主 agent 的解析客户端; base_url 填 → 独立端点
+# (custom/openai=OpenAI 兼容; gemini=Google generateContent, 仅 memory)。
+# provider 取值清单见 hermes_cli/models.py:CANONICAL_PROVIDERS; 插件放 providers/ 自动注册。
 # ═══════════════════════════════════════════════════════════════════════
-# The main agent lives at the top level of `model:` (default/provider/base_url/
-# api_key/supports_vision) — this is the Argus core key read everywhere.
-#
-# The multimodal per-role endpoints are nested beside it, each a 4-tuple
-# {provider, base_url, api_key, model}:
-#   • model.monitor  — always-on MonitorAgent (video SPEAK/SILENT + event merge)
-#   • model.watcher  — live-research deep-analysis worker (Router/Search/Recall)
-#   • model.memory   — layered-memory MemoryWriter/Reviewer (画面/音频观察/事件与实体)
-#       model.memory.recall — memory-recall sub-agent (recall_mm_memory tool)
-#
-# Uniform contract for every nested role:
-#   • base_url EMPTY  → that role FOLLOWS the main agent's resolved client.
-#   • base_url SET    → dedicated endpoint. provider "custom"/"openai" = an
-#                       OpenAI-compatible endpoint; "gemini" = Google
-#                       generateContent (memory only).
-#   • model alone (with empty base_url) just renames the model on the main
-#     endpoint.
-#
-# provider 可选值（完整清单见源码 hermes_cli/models.py:CANONICAL_PROVIDERS）：
-#   • custom        — 任意 OpenAI 兼容自建/代理端点（本项目主要用法，需 base_url+api_key）
-#   • openai / gemini — OpenAI 兼容 / Google generateContent（memory 角色可用）
-#   • 官方直连（需对应 API key 环境变量）：
-#       anthropic, openai-api, gemini, deepseek, xai, zai, alibaba, arcee
-#   • 聚合器 / 转售：
-#       openrouter, nous, moa, novita, huggingface, gmi, kilocode,
-#       opencode-zen, opencode-go, ollama-cloud
-#   • 云厂：bedrock (AWS), azure-foundry, nvidia
-#   • 订阅 / OAuth（需交互登录，不能纯 config 静态配）：
-#       copilot, copilot-acp, xai-oauth, qwen-oauth,
-#       kimi-coding, kimi-coding-cn, minimax, minimax-oauth, minimax-cn,
-#       stepfun, openai-codex
-#   • 中国区 / 本地：xiaomi, tencent-tokenhub, lmstudio
-#   插件式扩展：在 providers/ 目录放 provider 插件包会自动注册，无需改源码。
-#   查看运行时实际认证成功的 provider：hermes dashboard 打开 model picker。
-# -----------------------------------------------------------------------
 model:
-  # ── Main agent (GPT-5.6 Luna, doc 代理端点, 多模态) ──
-  # model 名须与网关精确匹配 (大小写/连字符错会 200 空返回)。key 该端点不校验。
+  # ── 主 agent ──
+  # model 名须与网关精确匹配 (大小写/连字符错会 200 空返回)。
   default: "GPT-5.6 Luna"
   provider: "custom"
   base_url: ""
   api_key: ""
   supports_vision: true
 
-  # ── MonitorAgent model (local MaaS canary; only this role is switched) ──
-  # Kimi K2.6 instant mode is injected by MonitorEngine. The MaaS gateway
-  # requires both Bearer auth and the same credential in the `api-key` header.
-  # Keep the credential in .env; never commit it into this file.
+  # ── MonitorAgent ──
+  # MaaS 网关要求 Bearer + api-key 头同传; 凭据放 .env, 勿提交本文件。
   monitor:
     provider: "custom"
     base_url: ""
@@ -79,82 +40,65 @@ model:
     model: "Kimi-K2.6"
     send_api_key_header: true
 
-  # ── Watcher = live-research deep-analysis worker ──
-  # 不产出最终汇总报告 —— 只有过程报告 (每轮), hook 每轮触发。
+  # ── Watcher = 深研 worker (只出过程报告, 每轮) ──
   watcher:
     provider: "custom"
     base_url: ""
     api_key: ""
     model: "GPT-5.6 Luna"
-    # 持续 live-watcher 攒帧 pace 兜底 (有场景 pace 时由场景决定)
     watch:
-      min_batch: 64                # 无场景/无 ttl 时的兜底目标帧数
-      round_ttl_sec: 120.0         # 无场景/无 ttl 时的兜底轮 ttl (秒)
+      min_batch: 64                # 无场景/无 ttl 时兜底目标帧数
+      round_ttl_sec: 120.0         # 兜底轮 ttl (秒)
       poll_interval: 2.0           # 攒帧轮询/进度推送间隔 (秒)
       report_every_rounds: 3       # 每 N 批推一次累积报告
-      # 原始采集仍持续、但去重后的画面连续 2 秒无新场景时，立即用手头尾帧分析，
-      # 不再等待正常的 10~200 秒分段 TTL。这里只提前触发视觉判断，不直接判结束。
+      # 无新场景持续 2 秒时提前用手头尾帧分析, 不等分段 TTL (只提前触发, 不直接判结束)。
       static_tail_flush_sec: 2.0
-      # Luna 接口最多 50 图；当前段与召回历史图共享 48 图预算，保留协议余量。
+      # 当前段与召回历史图共享 48 图预算 (接口上限 50, 留协议余量)。
       request_max_images: 48
-      # 分段模型标记“疑似结束”后，无新画面持续 2 秒即独立确认一次；
-      # 有可信结尾线索且没有恢复播放证据时立即结束并返回已有总结。
+      # 疑似结束 → 无新画面 2 秒独立确认一次; 有可信结尾线索立即结束。
       completion_confirm_delay_sec: 2.0
-      # 高级兼容项：只有显式把 max_attempts 调回 2+ 时才生效；二次门槛按候选
-      # 首次出现后的累计静止时长计算，首次模型调用耗时也计入。
+      # 仅当 max_attempts 显式 >1 时生效: 二次门槛按候选出现后累计静止时长算。
       completion_confirm_retry_total_sec: 8.0
-      # 明确的进度到末尾/重播/结束卡由分段模型直接 finish；其他疑似结尾确认一次，
-      # 不再串行调用两次视觉模型。0.6 接受“更可能结束”的判断。
+      # 分段模型直接 finish 明确的结束; 其他疑似结尾只确认一次, 不串行调两次视觉。
       completion_confirm_max_attempts: 1
       completion_confirm_frames: 8
       completion_confirm_min_confidence: 0.6
-    # ReAct 大脑 (多轮派 search/recall)
-    react:
+    react:                         # ReAct 大脑 (多轮派 search/recall)
       max_tokens: 512
       recent_frames: 8
       recent_history_turns: 16
-      max_rounds: 4                # ReAct 循环硬上限 (防死循环)
+      max_rounds: 4                # ReAct 循环硬上限
       round_max_tokens: 2048       # 收尾轮同时出 thought/tasks + 完整 answer
-      search_tasks_max: 5          # 成本闸: 一轮并发 search 子任务上限
-    # 外部检索
+      search_tasks_max: 5          # 一轮并发 search 子任务上限 (成本闸)
     search:
       max_tokens: 4096
       max_tool_rounds: 3
       recent_frames: 1             # 只看 anchor 一帧 (决定调工具 / 画 bbox)
-    # AnySearch (deep-research text_search 外部检索后端)
-    # POST endpoint JSON-RPC tools/call name="search"; key → Bearer (或 env
-    # ANYSEARCH_API_KEY)。图搜工具已废弃 (仅 text_search)。
+    # AnySearch (text_search 外部检索后端); key 也可走 env ANYSEARCH_API_KEY。
     anysearch:
       endpoint: "https://api.anysearch.com/mcp"
       api_key: ""
       max_results: 8               # <=10
-      result_max_chars: 4000       # 单条结果注入 ReAct 前截断; 0/负=不截
+      result_max_chars: 4000       # 单条结果注入前截断; 0/负=不截
       timeout: 30.0
 
-  # ── Memory model (MemoryWriter/Reviewer: 画面观察/事件与实体) ──
-  # provider 语义 (跟 monitor/watcher 同一套标准):
-  #   "custom"/"openai"/"" + base_url → OpenAI 兼容端点 (dialect 自动检测 dashscope/
-  #     moonshot, 并 wrap 适配 thinking/温度).
-  #   "gemini" → Google generateContent 原生; "gemini_omni" → 同左 + 能吃音频.
-  #   base_url 空 → 跟随主 agent.
-  # ★ MemoryWriter / Recall 默认用 GPT-5.6 Luna；Reviewer 在下方单独覆盖为
-  #   Kimi K3，以支持 50+ 图复盘。
+  # ── Memory model (MemoryWriter/Reviewer) ──
+  # base_url 空 → 跟随主 agent; "gemini" → Google generateContent 原生。
+  # Writer/Recall 用 GPT-5.6 Luna; Reviewer 下方单独覆盖为 Kimi K3 (支持 50+ 图复盘)。
   memory:
     provider: "custom"
     base_url: ""
     api_key: ""
     model: "GPT-5.6 Luna"
     vision_ability: true           # 记忆抽取是视觉任务, 必须 true (否则 backend 启动即报错)
-    # (v33: omni 原始音频路径已删 — 无 audio_ability/audio_window; 音频走外部 ASR 字幕)
     entity_alias_threshold: 0.85   # entity 归并模糊匹配阈值
     max_failures: 10               # 连续 N 次 wake 失败 → 停 writer loop
-    # MemoryWriter (10s wake; 事件边�� + entity/event 结构化输出)
     writer:
       wake_interval: 10.0          # 写入频率 (越大越省 token)
       max_tokens: 5000
       recent_frames: 20
       asr_window_sec: 15.0
-      entity:                      # E9 entity tier 三档分桶
+      entity:                      # entity tier 三档分桶 (E9)
         enabled: true
         min_seen: 2
         macro_lookback: 8
@@ -162,11 +106,11 @@ model:
         tier2_n: 10
         tier3_n: 15
         rep_frames_max: 5
-      event_timeline:              # E10 历史段用 macro+micro 事件
+      event_timeline:              # 历史段用 macro+micro 事件 (E10)
         enabled: true
         max_macros: 15
         max_micros: 30
-    # MemoryReviewer (120s wake, macro 触发)。独立用 Kimi K3, 避免 50+ 图复盘触发裁帧。
+    # MemoryReviewer (120s wake, macro 触发)。独立 Kimi K3, 避免 50+ 图复盘裁帧。
     reviewer:
       provider: "custom"
       # EntityReviewer 用第 1 个、EventReviewer 用第 2 个；只配一个时自动串行。
@@ -185,14 +129,14 @@ model:
       max_actions_per_round: 8
       image_max_side: 512
       image_jpeg_quality: 55
-      max_concurrency: 1             # 每个 URL 最多 1 个在途请求；两 URL 可并发
-      single_endpoint_interval_sec: 0.5  # 只配一个 URL 时，两次大请求间隔
-      overload_retries: 1            # 仅重试一次 429/EngineOverloaded/临时网关错误
+      max_concurrency: 1             # 每个 URL 最多 1 个在途请求
+      single_endpoint_interval_sec: 0.5  # 只配一个 URL 时两次大请求间隔
+      overload_retries: 1            # 仅重试 429/EngineOverloaded/临时网关错误
       retry_backoff_sec: 2.0
       max_failures: 10
       entity_enabled: true
       event_enabled: true
-      edge_enabled: false          # Edge no-op 骨架, 默认关
+      edge_enabled: false          # Edge 是 no-op 骨架, 默认关
       entity_frames: 12
       event_frames: 80             # EventReviewer 历史画面最高上限
       event_gate:                  # EventReviewer 昂贵, gate 门槛
@@ -203,8 +147,7 @@ model:
         min_distinct_entities: 25
         min_asr_cues: 12
         min_asr_chars: 600
-    # Memory-recall sub-agent (recall_mm_memory tool + live-research recall).
-    # decide/distill use model.memory; visual verify has a dedicated Luna endpoint.
+    # Memory-recall 子 agent (recall_mm_memory tool + 深研 recall)。
     recall:
       max_tokens: 2048
       max_rounds: 4
@@ -213,14 +156,14 @@ model:
       distill_max_tokens: 512
       decide_frames: 6            # Recall 决策时附 N 帧提问时刻画面
       verify_enabled: true         # 末尾视觉验收, 过滤无目标噪声帧
-      verify_max_frames: 10         # distill/verify 候选历史帧上限; 多工具命中时按工具公平分配
-      verify_retries: 1            # verify 无效 JSON/临时过载时额外重试一次
+      verify_max_frames: 10
+      verify_retries: 1
       verify_retry_delay_sec: 0.5
       verify_provider: "custom"
       verify_base_url: ""
       verify_api_key: ""
       verify_model: "GPT-5.6 Luna"
-      cont_frames_max: 6           # 最终给回答模型的历史真图上限; 按 distill 点名/召回相关性顺序取
+      cont_frames_max: 6           # 最终给回答模型的历史真图上限
     # L2 macro / L3 super 聚合
     aggregator:
       l2_min_micro: 5              # 攒满 5 micro 触发 L2
@@ -232,71 +175,58 @@ model:
       max_tokens: 2048
       image_max_side: 512
       image_jpeg_quality: 55
-    # micro 段强制切割兜底
-    micro:
+    micro:                         # micro 段强制切割兜底
       max_duration: 30.0           # 段最长 30s
       max_ticks: 6                 # 或 6 拍 (=30s)
-    # FrameStore (关键帧持久化)
-    frame_store:
+    frame_store:                   # 关键帧持久化
       max: 4000
       dedup_scan_n: 8
-      ts_exact_eps: 0.3            # 层1 同一瞬间 ts 容差 (秒)
+      ts_exact_eps: 0.3            # 同一瞬间 ts 容差 (秒)
 
   # ── Embedding (混合关键词+向量召回) ──
-  # DashScope text-embedding-v3 (compatible-mode)。base_url 空 → 全局关闭 embedding,
-  # search_* 走纯关键词兜底。
+  # base_url 空 → 关闭 embedding, search_* 走纯关键词兜底。
   embedding:
     provider: "openai"
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key: ""
     model: "text-embedding-v3"
-    dimensions: 1024               # 256/512/768/1024, 大数收益递减
+    dimensions: 1024               # 256/512/768/1024
     batch_size: 16
     timeout_sec: 4.0               # 超时降级到关键词
-    # 二期帧图像 embedding (T→I 跨模态)。model 空 → 关闭帧向量; api_key 空 → 复用上面。
-    # ★ 换模型注意: 维度变化会使老库帧向量静默失效。
-    frame:
+    frame:                         # 帧图像 embedding; model 空 → 关闭帧向量
       model: "tongyi-embedding-vision-plus-2026-03-06"
       base_url: ""
       api_key: ""
       dimensions: 1152             # 64~1152
-      res_level: 3                 # 0/1/2/3 → 单图 127/402/578/1026 token; 3 对小物体最好
+      res_level: 3                 # 0/1/2/3 → 单图 127/402/578/1026 token
       timeout_sec: 6.0
     hybrid:                        # 关键词×向量 RRF
-      enabled: true                # false → 只用关键词 (灰度回滚阀)
+      enabled: true                # false → 只用关键词
       vector_topk: 30
-      rrf_k: 60                    # RRF 常数, 论文推荐 60
+      rrf_k: 60
       frame_topk: 8
       # 0 = 对全部持久化关键帧分批计算 top-k；正数仅用于紧急限制延迟。
       frame_pool_cap: 0
 
-  # ── OCR (screen-share text extraction before MemoryWriter) ──
-  # 垂类 OCR 先把屏幕文字落到 screen_texts, writer 再消费。★ 必开 (无 enabled)。
-  # use_local=true → local_backend (rapidocr, 本地免 token, 缺包会报错不静默 fallback);
-  # false → remote_backend (云 VLM OCR)。
+  # ── OCR (screen-share 文字抽取, 必开) ──
+  # 仅本地 RapidOCR (rapidocr+onnxruntime 是必装依赖, 无端点/密钥)。
+  # 单实例多线程: 进程共享一个引擎, 最多 max_threads 并发; 全忙 → 跳过本次识别不重试。
   ocr:
-    use_local: true
     local_backend:
       backend: "rapidocr"          # 本地 OCR (无端点)
-    remote_backend:                # use_local=false 时用
-      provider: "openai"
-      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      api_key: ""                  # 空 → 复用 audio.dashscope_api_key / embedding.api_key
-      model: "qwen-vl-ocr"
-    timeout_sec: 4.0
+    timeout_sec: 8.0               # 单次识别超时
     max_tokens: 1200
     frames_per_wake: 1
     max_side: 1536
+    max_threads: 8                 # 并发识别线程上限
     worker:
-      interval: 1.0
+      interval: 3.0                # 后台 OCR 触发周期 (秒)
       backlog_limit: 12
       max_attempts: 3
 
 # ── Auxiliary clients ──
-# vision: vision_analyze 工具 + 浏览器截图分析 + HermesClientFactory vision 解析。
-# text: 轻量文本改写 (VoiceAgent 口播) + 语音意图前置分类/主线程分诊 (task="text")。
-#   use_local=true → local_backend (本地 Qwen2.5-0.5B-Instruct, 毫秒级离线);
-#   false → remote_backend (远端端点)。
+# vision: vision_analyze 工具 + 浏览器截图分析。text: 文本改写 + 语音意图分诊。
+#   use_local=true → 本地小模型; false → remote_backend (远端端点)。
 auxiliary:
   vision:
     provider: "custom"
@@ -304,8 +234,8 @@ auxiliary:
     base_url: ""
     api_key: ""
   text:
-    use_local: false               # ★ 意图+EOU 合并调用 & 分诊走远端 GPT-5.6 Luna
-    local_backend:                 # 本地小模型 (Qwen2.5-0.5B-Instruct, fp16/fp32 原生权重)
+    use_local: false               # 意图+EOU 合并调用 & 分诊走远端
+    local_backend:                 # 本地小模型 (Qwen2.5-0.5B-Instruct)
       local_path: "weights/qwen2.5-0.5b-instruct"     # 相对路径按 HERMES_HOME 解析
       local_hf_repo: "Qwen/Qwen2.5-0.5B-Instruct"     # 仅 download_weights.py 读
       local_device: "auto"         # auto / cpu / cuda / mps
@@ -317,33 +247,22 @@ auxiliary:
       api_mode: "anthropic_messages"
       api_key: ""
 
-
-# SKILLS: WatcherAgent 专属 skill 靠文件夹隔离 (<HERMES_HOME>/skills/_watcher/),
-# 无需在此配置。
-
-
 # ═══════════════════════════════════════════════════════════════════════
-# SETTINGS — cross-module behavior knobs (per-submodule knobs live under model.*;
-# speech under audio:; voice interaction under interaction:).
+# SETTINGS — 跨模块行为旋钮 (子模块旋钮在 model.*; 语音在 audio:/interaction:)。
 # ═══════════════════════════════════════════════════════════════════════
 settings:
   enabled: true
-  # 主 agent 【永不】被动注入帧。一次性 current/history/mixed 视觉问答
-  # 统一走 query_multimodal → QueryWorker（提问时刻帧 + 按需 Recall/Search）。
-  # get_current_frame 只用于用户明确要求取回/展示/诊断最新原始帧。
-  # 多模态记忆常开 (无 memory_enabled 开关; backend 无帧时空闲)。
+  # 主 agent 不被动注入帧; 视觉问答统一走 query_multimodal → QueryWorker。
+  # get_current_frame 只用于用户明确要求取回/展示最新原始帧。记忆常开 (无开关)。
 
-  # FrameBuffer (共享采集环 + 入口 dHash 去重)
-  framebuffer:
+  framebuffer:                     # 共享采集环 + 入口 dHash 去重
     seconds: 1800.0                # 30min 2fps 全保留 (~280MB @720p)
     capture_fps: 2.0
     dhash_threshold_init: 6
     dhash_threshold_min: 2         # 文字/会议类下限 (激进去重)
     dhash_threshold_max: 20        # 动态场景上限
 
-  # SceneDhashController: 每 interval 抽小图让 memory 模型判场景 → 输出
-  # {scene, dhash_threshold} JSON → 调去重阈值 + 攒帧节奏 (写进 FrameBuffer.current_scene)。
-  scene_probe:
+  scene_probe:                     # 抽小图判场景 → 调去重阈值 + 攒帧节奏
     interval_s: 20.0
     window_s: 20.0
     frames: 3
@@ -352,79 +271,65 @@ settings:
     use_llm: true                  # false → 阈值恒为 init
     timeout_s: 20.0
 
-  # 对话历史上限
-  conv:
+  conv:                            # 对话历史上限
     max_chars: 100000
     min_turns: 1
     max_bg_obs: 200
 
-  # 推给前端 UI 的缩略图
-  ui_event_thumb:
+  ui_event_thumb:                  # 推给前端 UI 的缩略图
     max_side: 480
     jpeg_quality: 70
 
-  # ── MemoryWriter L1 image payload guard ──────────────────────────────
-  # Writer keeps seeing the same selected recent frames, but downscales only
-  # the images sent to the writer LLM. OCR/screen_text can still use ocr_max_side.
+  # MemoryWriter L1 请求图 payload 压缩 (OCR/screen_text 仍可用 ocr_max_side)。
   writer_image_max_side: 1280
   writer_image_jpeg_quality: 80
 
-  # Session-scoped external-search fact cache. Dynamic facts (prices/current
-  # rankings) are revalidated after this TTL instead of entering video memory.
+  # 会话级外部检索事实缓存; 动态事实按 TTL 复验。
   search_facts_max: 64
   search_fact_ttl_sec: 3600
   search_fact_value_max_chars: 4000
-  # QueryWorker is session-scoped: run at most two Recall/Search jobs at once
-  # and keep no more than eight additional jobs waiting for a slot.
+  # QueryWorker 会话级并发上限。
   query_worker_max_concurrency: 2
   query_worker_max_pending: 8
 
-
 # ═══════════════════════════════════════════════════════════════════════
-# AUDIO — multimodal speech interface (ASR/TTS/env-audio). 主 chat 的 tts:/stt:
-# 是另一套。
+# AUDIO — 多模态语音接口 (ASR/TTS/env-audio)。主 chat 的 tts:/stt: 是另一套。
 # ═══════════════════════════════════════════════════════════════════════
 audio:
-  # ── User-speech ASR (mic → agent) ────────────────────────────────────
-  # 云 ASR 设 asr_api_key(→Bearer) + asr_model(→form)；自托管服务也可使用 multipart。
+  # 用户语音 ASR (mic → agent); 云 ASR 设 api_key + model, 自托管也可 multipart。
   asr_url: ""
   asr_api_key: ""
   asr_model: ""
 
-  # ── Environment-audio ASR (screen-share audio → 音频观察) ─────────────
-  # env_asr_backend: "dashscope"/"qwen" (one blob) | "whisperx" (多 speaker)。
-  # dashscope 用 compatible-mode input_audio; env_api_key 空 → 回退 dashscope_api_key。
+  # 环境音 ASR (屏幕共享音频 → 音频观察)。
+  # env_asr_backend: "dashscope"/"qwen" (整段一条) | "whisperx" (多 speaker)。
+  # env_api_key 空 → 回退 dashscope_api_key。
   env_asr_backend: "dashscope"
   env_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
   env_api_key: ""
   env_asr_model: "qwen3-asr-flash"
 
-  # ── DashScope realtime speech (streaming mic ASR + streaming TTS) ─────
-  # dashscope_api_key 是按账号百炼 key; 填 → 流式麦(实时 partial + 服务端 VAD)
-  # 和流式 TTS 生效; 空 → 两者静默禁用。ASR + TTS 共用这一个 key。
-  # ★ 扁平 schema (与 dev_0807 对齐; flatten 层 realtime_asr_* / env_audio_* 均认)。
+  # DashScope 实时语音 (流式麦 ASR + 流式 TTS)。key 空 → 两者静默禁用。
   dashscope_api_key: ""
   realtime_asr_enabled: true
   realtime_asr_model: "qwen3-asr-flash-realtime"
-  # VAD: threshold 越高越不敏感; silence_ms 越大越耐停顿。0.5/500ms 让 user 气泡早出 ~700ms。
+  # VAD: threshold 越高越不敏感; silence_ms 越大越耐停顿。
   realtime_asr_vad_threshold: 0.5
   realtime_asr_vad_silence_ms: 500
   realtime_tts_enabled: true
   realtime_tts_model: "qwen3-tts-flash-realtime"
   realtime_tts_voice: "Cherry"
   realtime_tts_speech_rate: 1.3               # 1.0=default(慢), 1.3≈自然, 上限 ~2.0
-  # 环境音门槛 (扁平)
+  # 环境音门槛
   env_audio_enabled: true
   env_audio_window_sec: 5.0
   env_audio_min_rms: 0.005
   env_audio_min_text_chars: 2
   env_audio_filter_fillers: true
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # INTERACTION — VoiceAgent 交互模式 (麦+喇叭同开; UI【对话】按钮控制)。
-# ★ 这批 key 保持【扁平】—— VoiceAgent 直接读原始 interaction 字典, 不经 flatten
-#   翻译层。嵌套会导致读不到 → 静默回落默认。勿嵌套。
+# ★ 这批 key 保持扁平 (VoiceAgent 直接读原始 dict, 不经 flatten) — 勿嵌套。
 # ═══════════════════════════════════════════════════════════════════════
 interaction:
   voice_interact_ctx_convo_turns: 6       # 拟词时看最近对话轮数
@@ -436,16 +341,13 @@ interaction:
   voice_decide_min_gap_sec: 3.0           # 距上次开口 < 此值且优先级不高 → 不说
   voice_decide_recent_n: 8                # 决策层判语义重复看的历史条数
   voice_main_input_max_queue: 8           # 主 Agent 输入 FIFO 上限
-  # 远场误识别防御 (层2 规则过滤)
-  voice_filter_min_chars: 3
-  voice_filter_dedup_window_sec: 2.0      # 距上句 < 此秒且高度重复 → 丢 (ASR 幻觉复述)
+  voice_filter_min_chars: 3               # 远场误识别防御 (层2 规则过滤)
+  voice_filter_dedup_window_sec: 2.0      # 距上句 < 此秒且高度重复 → 丢
   voice_filter_dedup_ratio: 0.8
-  # 层3 意图前置分类 (LLM 判"是否在跟我说话", 用 auxiliary.llm 端点)
-  voice_intent_check_enabled: true        # 关闭 → 只走层2规则
-  voice_intent_check_timeout_sec: 2.0     # LLM 超时 → 兜底放行 (宁误接不误拒)
+  voice_intent_check_enabled: true        # 层3 意图前置分类; 关闭 → 只走层2规则
+  voice_intent_check_timeout_sec: 2.0     # LLM 超时 → 兜底放行
   voice_intent_context_recent_ms: 15000   # 距上次对话 < 此 ms → 大概率延续, 可跳过
-  # EOU 拼接状态机: 本地/远端统一逻辑。监听中直接追加，非监听中调 LLM 判 {speak_to_me,is_end}。
-  #   本地超时 1.5s / 远端超时 2s (voice_eou_remote_timeout_sec)。EOU 始终开启，无关闭开关。
+  # EOU 拼接状态机 (始终开启, 无关闭开关)。
   voice_eou_timeout_sec: 1.5              # 本地模式: 监听中超时强制 flush (秒)
   voice_eou_remote_timeout_sec: 2.0       # 远端模式: 监听中超时强制 flush (秒)
   voice_eou_max_buffer_segs: 5            # 最多拼几段 (防无限拼接)

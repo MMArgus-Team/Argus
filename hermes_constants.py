@@ -53,20 +53,19 @@ def _get_platform_default_hermes_home() -> Path:
 
 
 def _configured_argus_home(env: dict[str, str] | None = None) -> str:
-    """Return the configured Argus home, honoring the legacy env alias.
+    """Return the configured Argus home.
 
-    ``ARGUS_HOME`` is canonical. ``HERMES_HOME`` remains a read-only fallback
-    so existing profiles and launch scripts continue to work during migration.
+    Only ``ARGUS_HOME`` is honored. The legacy ``HERMES_HOME`` env alias was
+    removed — unset ``ARGUS_HOME`` falls through to the platform default.
     """
     source = os.environ if env is None else env
-    return source.get("ARGUS_HOME", "").strip() or source.get("HERMES_HOME", "").strip()
+    return source.get("ARGUS_HOME", "").strip()
 
 
 def get_hermes_home() -> Path:
     """Return the Argus home directory (default: platform-native path).
 
-    Reads ``ARGUS_HOME`` first, then the deprecated ``HERMES_HOME`` alias,
-    and finally falls back to the platform-native default.
+    Reads ``ARGUS_HOME`` and falls back to the platform-native default.
     This is the single source of truth — all other copies should import this.
 
     When ``ARGUS_HOME`` is unset but an ``active_profile`` file indicates

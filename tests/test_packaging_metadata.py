@@ -99,8 +99,9 @@ def test_packaging_declared_as_core_dependency():
     )
 
 
-def test_argus_console_scripts_are_canonical_and_hermes_aliases_remain():
-    """Public commands use Argus while existing Hermes installs keep working."""
+def test_argus_console_scripts_are_canonical_no_hermes_aliases():
+    """Public commands use Argus only — the legacy Hermes entry points were
+    removed (no `hermes` / `hermes-agent` / `hermes-acp` shims)."""
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = data["project"]["scripts"]
 
@@ -109,9 +110,9 @@ def test_argus_console_scripts_are_canonical_and_hermes_aliases_remain():
     assert scripts["argus-acp"] == "acp_adapter.entry:main"
     assert scripts["mm-argus"] == "run_agent:main"
 
-    assert scripts["hermes"] == "hermes_cli.main:main"
-    assert scripts["hermes-agent"] == scripts["argus-agent"]
-    assert scripts["hermes-acp"] == scripts["argus-acp"]
+    assert "hermes" not in scripts
+    assert "hermes-agent" not in scripts
+    assert "hermes-acp" not in scripts
 
 
 def test_faster_whisper_is_not_a_base_dependency():

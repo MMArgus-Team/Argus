@@ -2635,8 +2635,8 @@ def setup_multimodal(config: dict):
     tracking) so it's actually usable, then re-check and report.
 
     Writes keys to the config paths ``flatten_mm_config`` reads
-    (``audio.dashscope_api_key``, the ``model.*.anysearch`` block,
-    ``settings.ocr_use_local``). For install/download steps that we can't do
+    (``audio.dashscope_api_key``, the ``model.*.anysearch`` block). For
+    install/download steps that we can't do
     safely inline, prints the exact command. Env-var keys the runtime already
     prefers (DASHSCOPE_API_KEY / ANYSEARCH_API_KEY) are honored — if one is set
     we don't nag for it.
@@ -2698,13 +2698,13 @@ def setup_multimodal(config: dict):
     else:
         print_info("深研: 检测到 env ANYSEARCH_API_KEY,已就绪。")
 
-    # ---- 记忆 (本地 OCR: rapidocr) --------------------------------------
+    # ---- 记忆 (本地 OCR: rapidocr, 必装依赖) --------------------------------
     print()
     from agent.multimodal.readiness import _module_installed  # cheap probe
     if not _module_installed("rapidocr"):
-        print_warning("记忆后端需要 rapidocr,但未安装 — 未装时记忆功能会拒绝启动。")
+        print_warning("rapidocr 未安装 — 这是必装依赖 (本地 OCR 唯一后端), 记忆功能会拒绝启动。")
         if prompt_yes_no("现在安装 rapidocr?", default=True):
-            _mm_pip_install(['.[web,ocr]'])
+            _mm_pip_install(['.[web]'])
     else:
         print_info("记忆: rapidocr 已安装。")
 

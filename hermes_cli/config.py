@@ -163,7 +163,7 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #   ``$EDITOR``.
 # * ``SHELL`` — what subprocess uses with ``shell=True`` (we try to
 #   avoid that, but defense in depth).
-# * ``HERMES_HOME`` / ``ARGUS_PROFILE`` / ``ARGUS_CONFIG`` /
+# * ``ARGUS_HOME`` / ``ARGUS_PROFILE`` / ``ARGUS_CONFIG`` /
 #   ``ARGUS_ENV`` — Argus runtime location flags. Writing these into
 #   ``.env`` would relocate state in ways the user did not request from
 #   the dashboard. ``config.yaml`` is the supported surface for these.
@@ -210,7 +210,7 @@ def _reject_denylisted_env_var(key: str) -> None:
             f"Environment variable {key!r} is on the writer denylist. "
             "Names that influence subprocess execution (LD_PRELOAD, "
             "PYTHONPATH, PATH, EDITOR, ...) or Argus runtime location "
-            "(HERMES_HOME, ARGUS_PROFILE, ...) cannot be persisted via "
+            "(ARGUS_HOME, ARGUS_PROFILE, ...) cannot be persisted via "
             "the env writer. If you really need this, edit "
             "~/.argus/.env directly."
         )

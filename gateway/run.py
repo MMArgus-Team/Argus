@@ -18145,7 +18145,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         else:
             hermes_home = str(get_hermes_home())
             logger.error(
-                "Another gateway instance is already running (PID %d, HERMES_HOME=%s). "
+                "Another gateway instance is already running (PID %d, ARGUS_HOME=%s). "
                 "Use 'argus gateway restart' to replace it, or 'argus gateway stop' first.",
                 existing_pid, hermes_home,
             )

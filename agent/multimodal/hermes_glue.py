@@ -648,10 +648,10 @@ _NUMERIC_KEYS = (
     "frame_vector_pool_cap",
     "mm_embedding_dimensions", "mm_embedding_res_level",
     # ★ OCR 垂类模型: writer 前置屏幕文字抽取 (v33: ocr_enabled 删 → 必开;
-    #   ocr_use_local 决定 local(rapidocr) / remote(cloud VLM))
-    "ocr_use_local", "ocr_timeout_sec", "ocr_max_tokens", "ocr_frames_per_wake",
-    "ocr_max_side", "ocr_worker_interval", "ocr_worker_backlog_limit",
-    "ocr_worker_max_attempts",
+    #   local-only rapidocr — remote/cloud VLM OCR 已移除)
+    "ocr_timeout_sec", "ocr_max_tokens", "ocr_frames_per_wake",
+    "ocr_max_side", "ocr_max_threads", "ocr_worker_interval",
+    "ocr_worker_backlog_limit", "ocr_worker_max_attempts",
     # Dedicated Monitor MaaS auth compatibility. Default False preserves the
     # exact client kwargs used by all existing endpoints.
     "monitor_send_api_key_header",
@@ -703,8 +703,8 @@ _EMBEDDING_BACKEND_KEYS = (
     # ★ 二期: 帧图像 embedding 字符串项 (DashScope multimodal-embedding-v1)
     "mm_embedding_model", "mm_embedding_base_url", "mm_embedding_api_key",
 )
+# OCR backend string keys (local-only rapidocr; remote 4-tuple removed).
 _OCR_BACKEND_KEYS = (
-    "ocr_provider", "ocr_base_url", "ocr_api_key", "ocr_model",
     "ocr_backend",
 )
 
@@ -728,6 +728,11 @@ _RETIRED_KEYS = frozenset({
     "cont_temperature", "writer_temperature", "react_temperature",
     "watcher_answer_temperature", "search_temperature", "recall_temperature",
     "mem_aggregator_temperature", "reviewer_temperature",
+    # Remote/cloud VLM OCR removed (local rapidocr is the only backend):
+    # model.ocr.use_local + model.ocr.remote_backend.{provider,base_url,
+    # api_key,model} → flat ocr_use_local / ocr_provider / ocr_base_url /
+    # ocr_api_key / ocr_model no longer map to any Config field.
+    "ocr_use_local", "ocr_provider", "ocr_base_url", "ocr_api_key", "ocr_model",
 })
 
 
@@ -780,7 +785,7 @@ _MODEL_ROLE_MAP = (
     ("watcher", "watcher"),
     ("memory", "memory"),
     ("embedding", "embedding"),
-    ("ocr", "ocr"),
+    # (ocr removed: remote VLM OCR 4-tuple deleted — OCR is local rapidocr only.)
 )
 _ROLE_TUPLE_FIELDS = ("provider", "base_url", "api_key", "model")
 
@@ -1110,8 +1115,12 @@ def flatten_mm_config(hermes_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "mm_model", "mm_base_url", "mm_api_key", "backend",
     }
     # Sub-dicts handled by their own special-case (not the generic walker).
+    # NOTE: model.ocr.remote_backend is deliberately NOT skipped here — its
+    # leaves fall through to the generic walker and resolve to flat ocr_* keys
+    # that are now retired (remote VLM OCR removed), loading silently via
+    # _RETIRED_KEYS instead of being mapped to a Config field.
     _ROLE_SUBDICT_SKIP = {("watcher", "anysearch"),
-                          ("ocr", "local_backend"), ("ocr", "remote_backend")}
+                          ("ocr", "local_backend")}
     for role in ("monitor", "watcher", "memory", "embedding", "ocr"):
         sub = model.get(role)
         if not isinstance(sub, dict):
@@ -1148,10 +1157,12 @@ def flatten_mm_config(hermes_cfg: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 unknown_leaves.append(f"{_as_src}.{k}")
 
-    # ocr local_backend / remote_backend nested blocks (v33):
-    #   model.ocr.local_backend.backend  → ocr_backend
-    #   model.ocr.remote_backend.{provider,base_url,api_key,model} → ocr_*
-    #   (use_local + scalar knobs flow via the generic role walker as ocr_*.)
+    # ocr local_backend nested block (v33): model.ocr.local_backend.backend →
+    # ocr_backend (the local rapidocr backend name). The remote_backend block
+    # (model.ocr.remote_backend.{provider,base_url,api_key,model}) was REMOVED —
+    # remote/cloud VLM OCR no longer exists; those leaves now fall through the
+    # generic walker to retired flat ocr_* keys (see _RETIRED_KEYS) so old
+    # configs load silently.
     _ocr_blk = model.get("ocr")
     if isinstance(_ocr_blk, dict):
         _lb = _ocr_blk.get("local_backend")
@@ -1161,16 +1172,6 @@ def flatten_mm_config(hermes_cfg: Dict[str, Any]) -> Dict[str, Any]:
             for k in _lb:
                 if k != "backend":
                     unknown_leaves.append(f"model.ocr.local_backend.{k}")
-        _rb = _ocr_blk.get("remote_backend")
-        if isinstance(_rb, dict):
-            _RB_MAP = {"provider": "ocr_provider", "base_url": "ocr_base_url",
-                       "api_key": "ocr_api_key", "model": "ocr_model"}
-            for k, v in _rb.items():
-                flat = _RB_MAP.get(k)
-                if flat:
-                    out[flat] = v
-                else:
-                    unknown_leaves.append(f"model.ocr.remote_backend.{k}")
 
     for parent_path, leaf, value in _deep_pairs:
         if value is None:
@@ -1873,7 +1874,7 @@ class HermesClientFactory(LLMClientFactory):
 
         if client is None:
             raise RuntimeError(
-                "multimodal: no LLM provider could be resolved from Hermes config. "
+                "multimodal: no LLM provider could be resolved from Argus config. "
                 "Configure a model with `argus model` (a vision-capable model is "
                 "recommended for the video stream).")
         self._cached = (client, model)

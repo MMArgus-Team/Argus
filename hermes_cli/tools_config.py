@@ -102,8 +102,10 @@ def gui_toolset_label(label: str) -> str:
 
 
 # Toolsets that are OFF by default for new installs.
-# They're still in _HERMES_CORE_TOOLS (available at runtime if enabled),
-# but the setup checklist won't pre-select them for first-time users.
+# They're still resolvable at runtime if the user explicitly enables them
+# (via `argus tools` or config.yaml / env), but the setup checklist won't
+# pre-select them for first-time users and per-platform defaults never add
+# them implicitly.
 #
 # Video gen is off by default — it's a niche, paid, slow feature. Users
 # who want it opt in via `argus tools` → Video Generation, which walks
@@ -115,7 +117,13 @@ def gui_toolset_label(label: str) -> str:
 # `argus tools` → X (Twitter) Search setup walks users through credential
 # setup. The tool's check_fn means the schema still won't appear to the
 # model if the credential later goes missing or expires.
-_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search"}
+#
+# Computer use is off by default AND removed from _HERMES_CORE_TOOLS: it is
+# an explicit opt-in capability. The gateway (tui_gateway _make_agent) only
+# enables the `computer_use` toolset when the computer-use skill is explicitly
+# preloaded; everywhere else it appears solely when the user turns it on via
+# `argus tools` → Computer Use.
+_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "computer_use"}
 
 
 def _xai_credentials_present() -> bool:

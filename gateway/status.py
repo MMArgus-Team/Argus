@@ -331,7 +331,7 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     gateway.  That recycled PID's command line still ``looks_like_gateway`` —
     so without a profile check the dead profile is reported running.  A named
     profile gateway carries ``-p <name>``/``--profile <name>`` (or, rarely, an
-    explicit ``HERMES_HOME=<path>``) on its argv; the default/root gateway runs
+    explicit ``ARGUS_HOME=<path>``) on its argv; the default/root gateway runs
     bare with no profile flag.
     """
     command_lc = command.lower()
@@ -343,17 +343,17 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
         return (
             f"--profile {profile_lc}" in command_lc
             or f"-p {profile_lc}" in command_lc
-            or f"hermes_home={home_lc}" in command_lc
+            or f"argus_home={home_lc}" in command_lc
         )
 
     # Default/root profile: the gateway runs with no profile flag. Accept unless
     # the command advertises *some other* profile (an explicit -p/--profile) or
-    # a non-matching explicit HERMES_HOME= on the argv. HERMES_HOME is usually
+    # a non-matching explicit ARGUS_HOME= on the argv. ARGUS_HOME is usually
     # passed via the environment (not visible on the command line), so its mere
     # absence is not disqualifying — only a conflicting explicit value is.
     if "--profile " in command_lc or " -p " in command_lc:
         return False
-    if "hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc:
+    if "argus_home=" in command_lc and f"argus_home={home_lc}" not in command_lc:
         return False
     return True
 

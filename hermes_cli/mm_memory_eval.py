@@ -703,7 +703,7 @@ def _eval_one_video(
         print(f"[mm-eval]   answer_predict={pred[:120]!r}")
 
     win = max(1, int(round(float(getattr(cfg, "writer_wake_interval", 10.0)) * fps)))
-    ocr_interval = max(0.2, float(getattr(cfg, "ocr_worker_interval", 1.0) or 1.0))
+    ocr_interval = max(0.2, float(getattr(cfg, "ocr_worker_interval", 3.0) or 3.0))
     next_ocr_ts = 0.0
     scene_interval = max(1.0, float(getattr(cfg, "scene_probe_interval_s", 20.0) or 20.0))
     next_scene_ts = scene_interval

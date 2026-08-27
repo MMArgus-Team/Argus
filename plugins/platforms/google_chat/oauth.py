@@ -72,8 +72,8 @@ from typing import Any, List, Optional, Tuple
 # after the in-tree → plugin migration. See adapter.py for context.
 logger = logging.getLogger("gateway.platforms.google_chat_user_oauth")
 
-# Use the project's HERMES_HOME helper so the token follows the user's
-# profile (e.g. tests can override via HERMES_HOME=/tmp/...).
+# Use the project's home helper so the token follows the user's
+# profile (e.g. tests can override via ARGUS_HOME=/tmp/...).
 try:
     from hermes_constants import display_hermes_home, get_hermes_home
 except (ModuleNotFoundError, ImportError):
@@ -95,9 +95,9 @@ from utils import atomic_replace
 
 
 def _hermes_home() -> Path:
-    """Resolve HERMES_HOME at call time (NOT module import).
+    """Resolve the Argus home at call time (NOT module import).
 
-    Tests and ``HERMES_HOME=...`` env overrides need this to be late-
+    Tests and ``ARGUS_HOME=...`` env overrides need this to be late-
     binding. If we cached the path at import time, switching profiles
     or tweaking env vars in tests would silently keep using the old
     path."""

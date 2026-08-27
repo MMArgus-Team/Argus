@@ -7,7 +7,7 @@ import textwrap
 
 def test_container_sets_hosted_write_policy_env(built_image: str) -> None:
     script = (
-        'test "$HERMES_HOME" = "/opt/data" && '
+        'test "$ARGUS_HOME" = "/opt/data" && '
         'test "$ARGUS_WRITE_SAFE_ROOT" = "/opt/data" && '
         'test "$ARGUS_DISABLE_LAZY_INSTALLS" = "1" && '
         'test "$PYTHONDONTWRITEBYTECODE" = "1"'

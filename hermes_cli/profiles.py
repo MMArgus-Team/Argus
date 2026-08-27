@@ -1867,10 +1867,10 @@ def rename_profile(old_name: str, new_name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def resolve_profile_env(profile_name: str) -> str:
-    """Resolve a profile name to a HERMES_HOME path string.
+    """Resolve a profile name to an ARGUS_HOME path string.
 
     Called early in the CLI entry point, before any hermes modules
-    are imported, to set the HERMES_HOME environment variable.
+    are imported, to set the ARGUS_HOME environment variable.
     """
     canon = normalize_profile_name(profile_name)
     validate_profile_name(canon)

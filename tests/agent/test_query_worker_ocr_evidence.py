@@ -11,6 +11,7 @@ from agent.multimodal.memory_backend import MemoryBackend
 from agent.multimodal._workers import (
     _QUERY_OCR_PROMPT_MAX_CHARS,
     _query_ocr_prompt_json,
+    _RapidOCRSharedPool,
     RapidOCRClient,
     ScreenOCRWorker,
     WatcherWorker,
@@ -64,14 +65,26 @@ class _ScreenTextStore:
 def _worker(*, rows=None):
     worker = ScreenOCRWorker.__new__(ScreenOCRWorker)
     worker.cfg = SimpleNamespace(
-        ocr_worker_interval=1.0,
-        ocr_timeout_sec=4.0,
+        ocr_worker_interval=3.0,
+        ocr_timeout_sec=8.0,
         ocr_max_tokens=1200,
     )
     worker.ocr_client = _OCRClient()
     worker.screen_text_store = _ScreenTextStore(rows)
-    worker._extract_lock = asyncio.Lock()
     return worker
+
+
+def _real_client(max_threads: int = 8) -> RapidOCRClient:
+    """A RapidOCRClient bound to a FRESH pool (not the process singleton), so
+    tests can saturate it without affecting other tests."""
+    client = RapidOCRClient.__new__(RapidOCRClient)
+    client.enabled = True
+    client.max_side = 0
+    client._missing_reason = ""
+    client._pool = _RapidOCRSharedPool(max_threads)
+    client.max_threads = client._pool.max_threads
+    client._frame_to_image_input = lambda frame: (frame, 1, 1)
+    return client
 
 
 def test_camera_ocr_uses_all_three_latest_frozen_raw_frames_once():
@@ -200,10 +213,16 @@ def test_screen_writer_vlm_row_is_not_reused_as_background_ocr():
     asyncio.run(_case())
 
 
-def test_query_ocr_skips_quickly_when_background_extraction_gate_is_busy():
+def test_query_ocr_skips_quickly_when_ocr_pool_is_saturated():
     async def _case():
         worker = _worker()
-        await worker._extract_lock.acquire()
+        client = _real_client()
+        # Saturated pool: every OCR thread is busy → ask-time OCR must skip
+        # fast (no queueing behind the background batch) and never touch the
+        # shared engine.
+        for _ in range(client.max_threads):
+            assert client._pool.try_acquire() is True
+        worker.ocr_client = client
         frame = Frame(ts=1.0, jpeg_b64="raw", source_type="camera")
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -211,31 +230,34 @@ def test_query_ocr_skips_quickly_when_background_extraction_gate_is_busy():
             evidence = await worker.collect_query_evidence(
                 [frame], ask_ts=1.0)
         finally:
-            worker._extract_lock.release()
+            for _ in range(client.max_threads):
+                client._pool.release()
         elapsed = loop.time() - started
 
         assert evidence == []
-        assert worker.ocr_client.calls == []
+        assert client._pool._engine is None
         assert elapsed < 0.5
 
     asyncio.run(_case())
 
 
-def test_rapidocr_busy_gate_never_starts_overlapping_inference():
-    client = RapidOCRClient.__new__(RapidOCRClient)
-    client._inference_lock = threading.Lock()
-    client._inference_lock.acquire()
-    client._ensure_engine = lambda: (_ for _ in ()).throw(
-        AssertionError("busy batch must not touch the OCR engine"))
+def test_rapidocr_saturated_pool_never_touches_the_engine():
+    client = _real_client()
+    for _ in range(client.max_threads):
+        assert client._pool.try_acquire() is True
     try:
         result = client._extract_sync([
             Frame(ts=1.0, jpeg_b64="raw", source_type="camera")])
     finally:
-        client._inference_lock.release()
+        for _ in range(client.max_threads):
+            client._pool.release()
     assert result == {}
+    # The skip happens BEFORE ensure_engine(): a saturated pool must not pay
+    # the model-load cost (or start another inference) for a skipped batch.
+    assert client._pool._engine is None
 
 
-def test_rapidocr_timeout_thread_keeps_single_flight_until_it_really_exits():
+def test_rapidocr_timeout_thread_holds_slot_but_other_threads_still_run():
     async def _case():
         entered = threading.Event()
         release = threading.Event()
@@ -251,25 +273,23 @@ def test_rapidocr_timeout_thread_keeps_single_flight_until_it_really_exits():
             calls["active"] -= 1
             return None
 
-        client = RapidOCRClient.__new__(RapidOCRClient)
-        client.enabled = True
-        client._engine = _engine
-        client._engine_lock = threading.Lock()
-        client._inference_lock = threading.Lock()
-        client._frame_to_image_input = lambda frame: (frame, 1, 1)
+        client = _real_client()
+        client._pool._engine = _engine  # inject the fake engine
         frame = Frame(ts=1.0, jpeg_b64="raw", source_type="camera")
         try:
             first = await client.extract(
                 [frame], max_tokens=0, timeout_sec=0.05)
             assert first == {}
             assert entered.is_set()
-            # The to_thread job is still inside the engine.  A new batch must
-            # skip instead of starting another inference after timeout.
+            # The timed-out to_thread job is still inside the engine and keeps
+            # holding its pool slot.  The pool still has free threads, so a
+            # new batch runs CONCURRENTLY (single engine, multi-threaded)
+            # instead of queueing behind the timed-out job.
             second = await client.extract(
-                [frame], max_tokens=0, timeout_sec=0.2)
+                [frame], max_tokens=0, timeout_sec=0.1)
             assert second == {}
-            assert calls["count"] == 1
-            assert calls["max_active"] == 1
+            assert calls["count"] == 2
+            assert calls["max_active"] == 2
         finally:
             release.set()
             for _ in range(50):

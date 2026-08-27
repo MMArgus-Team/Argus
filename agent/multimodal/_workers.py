@@ -963,93 +963,6 @@ def _mm_research_skills_block() -> str:
 MEMORY_WRITER_SYSTEM = """Legacy placeholder. Runtime MemoryWriter prompt is defined in English below before any model call. This placeholder intentionally contains no model instructions."""
 
 
-OCR_SYSTEM = """Legacy placeholder. Runtime OCR prompt is defined in English below before any model call. This placeholder intentionally contains no model instructions."""
-
-
-class QwenVLOCRClient:
-    """OpenAI-compatible VLM OCR wrapper kept as a deep/fallback OCR backend."""
-
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self.model = (getattr(cfg, "ocr_model", "") or "").strip()
-        # OCR always on (v33); this backend is usable once a model is configured.
-        self.enabled = bool(self.model)
-        base_url = (getattr(cfg, "ocr_base_url", "") or "").strip()
-        api_key = (
-            (getattr(cfg, "ocr_api_key", "") or "").strip()
-            or (getattr(cfg, "dashscope_api_key", "") or "").strip()
-            or (getattr(cfg, "embedding_api_key", "") or "").strip()
-            or "EMPTY"
-        )
-        if not base_url:
-            base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        self.base_url = base_url
-        self.client: Optional[AsyncOpenAI] = None
-        if self.enabled:
-            self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
-
-    async def extract(
-        self, frames: List[Frame], *,
-        max_tokens: int, timeout_sec: float,
-    ) -> Dict[float, Dict[str, Any]]:
-        if not self.enabled or self.client is None or not frames:
-            return {}
-        content: List[Dict[str, Any]] = [{
-            "type": "text",
-            "text": (
-                "Below are desktop screenshots. Each image is preceded by "
-                "[Frame | ts=XX.Xs]. Output OCR JSON for every frame that "
-                "contains readable text."
-            ),
-        }]
-        for fr in frames:
-            content.append({"type": "text",
-                            "text": f"[Frame | ts={fr.ts:.1f}s]"})
-            content.append(frame_to_image_content(fr))
-        msgs = [
-            {"role": "system", "content": OCR_SYSTEM},
-            {"role": "user", "content": content},
-        ]
-        kwargs = dict(
-            model=self.model,
-            messages=msgs,
-            max_tokens=max_tokens,
-            timeout=timeout_sec,
-        )
-        try:
-            resp = await self.client.chat.completions.create(
-                **kwargs, extra_body={"enable_thinking": False})
-        except Exception as first_err:
-            try:
-                resp = await self.client.chat.completions.create(**kwargs)
-            except Exception as e:
-                log.warning("[ocr] request failed model=%s endpoint=%s: %s "
-                            "(first attempt: %s)",
-                            self.model, self.base_url, e, first_err)
-                return {}
-        raw = ""
-        try:
-            raw = _msg_text(resp) or ""
-        except Exception:
-            raw = ""
-        parsed = extract_json_obj(raw)
-        if not isinstance(parsed, dict):
-            log.warning("[ocr] JSON parse failed raw=%r", raw[:200])
-            return {}
-        items = parsed.get("frames") or []
-        if not isinstance(items, list):
-            return {}
-        out: Dict[float, Dict[str, Any]] = {}
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            ts = _parse_ts_value(item.get("ts") or item.get("t"))
-            if ts is None:
-                continue
-            out[float(ts)] = item
-        return out
-
-
 def _dump_ocr_debug(fr: Frame, raw_text: str, blocks: List[Dict[str, Any]]) -> None:
     """Dump the OCR input frame and parsed text when ARGUS_OCR_DUMP=1."""
     if os.environ.get("ARGUS_OCR_DUMP", "0").strip().lower() not in {
@@ -1104,8 +1017,77 @@ def _dump_ocr_debug(fr: Frame, raw_text: str, blocks: List[Dict[str, Any]]) -> N
         log.debug("[ocr-dump] failed: %s", exc)
 
 
+class _RapidOCRSharedPool:
+    """Process-wide SINGLE-INSTANCE multi-threaded RapidOCR pool.
+
+    One shared ``rapidocr.RapidOCR`` engine serves up to ``max_threads``
+    (default 8) concurrent inference calls. Sharing a single engine across
+    threads is safe here: rapidocr 3.x only mutates instance params when
+    non-default overrides are passed to ``__call__`` (this client never does),
+    and the underlying onnxruntime sessions accept concurrent ``run()`` calls.
+    Admission is NON-BLOCKING: a recognition that finds every thread busy is
+    SKIPPED — no queueing, no retry. The next 3s worker wake re-selects the
+    frames (see ScreenOCRWorker._select_frames).
+    """
+
+    __slots__ = ("max_threads", "_engine", "_engine_lock", "_busy", "_busy_lock")
+
+    def __init__(self, max_threads: int):
+        self.max_threads = max(1, int(max_threads or 8))
+        self._engine: Any = None
+        self._engine_lock = threading.Lock()
+        self._busy = 0
+        self._busy_lock = threading.Lock()
+
+    def ensure_engine(self) -> Any:
+        engine = self._engine
+        if engine is not None:
+            return engine
+        with self._engine_lock:
+            if self._engine is None:
+                from rapidocr import RapidOCR
+                self._engine = RapidOCR()
+            return self._engine
+
+    def try_acquire(self) -> bool:
+        """Reserve one inference thread if any is free. False → saturated."""
+        with self._busy_lock:
+            if self._busy >= self.max_threads:
+                return False
+            self._busy += 1
+            return True
+
+    def release(self) -> None:
+        with self._busy_lock:
+            self._busy -= 1
+
+
+# One pool per process ("single instance"): every RapidOCRClient / worker /
+# session shares the same engine + thread budget. First caller's cap wins.
+_OCR_POOL: Optional[_RapidOCRSharedPool] = None
+_OCR_POOL_LOCK = threading.Lock()
+
+
+def _shared_ocr_pool(max_threads: int) -> _RapidOCRSharedPool:
+    """Return the process-wide single RapidOCR pool (first config wins)."""
+    global _OCR_POOL
+    pool = _OCR_POOL
+    if pool is None:
+        with _OCR_POOL_LOCK:
+            if _OCR_POOL is None:
+                _OCR_POOL = _RapidOCRSharedPool(max_threads)
+            pool = _OCR_POOL
+    return pool
+
+
 class RapidOCRClient:
-    """Local RapidOCR/PP-OCR wrapper for low-latency screen text indexing."""
+    """Local RapidOCR/PP-OCR wrapper for low-latency screen text indexing.
+
+    SINGLE shared engine, multi-threaded: one process-wide RapidOCR instance
+    serves up to ``ocr_max_threads`` (default 8) concurrent inference calls.
+    A recognition that finds every thread busy is skipped (never queued or
+    retried) — the next wake re-selects the frames.
+    """
 
     model = "rapidocr"
 
@@ -1114,14 +1096,14 @@ class RapidOCRClient:
         # OCR always on (v33); usable unless the local package is missing.
         self.enabled = True
         self.max_side = int(getattr(cfg, "ocr_max_side", 0) or 0)
-        self._engine: Any = None
-        self._engine_lock = threading.Lock()
-        # RapidOCR inference itself is not thread-safe.  More importantly,
-        # ``asyncio.wait_for(asyncio.to_thread(...))`` cannot stop the worker
-        # thread after a timeout.  A non-blocking process-wide-per-client gate
-        # prevents the next background/query request from starting a second
-        # inference while that timed-out thread is still finishing.
-        self._inference_lock = threading.Lock()
+        # NOTE: ``asyncio.wait_for(asyncio.to_thread(...))`` cannot stop the
+        # worker thread after a timeout.  The pool's non-blocking admission
+        # prevents the next background/query request from starting another
+        # inference while a timed-out thread is still finishing — it skips
+        # instead (single-flight until the timed-out thread really exits).
+        max_threads = max(1, int(getattr(cfg, "ocr_max_threads", 8) or 8))
+        self._pool = _shared_ocr_pool(max_threads)
+        self.max_threads = self._pool.max_threads
         self._missing_reason = ""
         if importlib.util.find_spec("rapidocr") is None:
             self.enabled = False
@@ -1129,15 +1111,6 @@ class RapidOCRClient:
         elif importlib.util.find_spec("onnxruntime") is None:
             self.enabled = False
             self._missing_reason = "onnxruntime package is not installed"
-
-    def _ensure_engine(self) -> Any:
-        if self._engine is not None:
-            return self._engine
-        with self._engine_lock:
-            if self._engine is None:
-                from rapidocr import RapidOCR
-                self._engine = RapidOCR()
-        return self._engine
 
     def _frame_to_image_input(self, fr: Frame) -> Tuple[Any, int, int]:
         """解码 JPEG -> numpy RGB, 再按 [1280, upper] 规整最长边 (小图放大救小字,
@@ -1235,15 +1208,15 @@ class RapidOCRClient:
         return _to_blocks(frags, img_w, img_h)
 
     def _extract_sync(self, frames: List[Frame]) -> Dict[float, Dict[str, Any]]:
-        # Single-flight: rapidocr inference is CPU-bound and not reentrant, so
-        # an overlapping batch is skipped rather than queued behind this one.
-        if not self._inference_lock.acquire(blocking=False):
+        # Single shared engine, up to max_threads concurrent inferences.  If
+        # every thread is busy → SKIP this recognition (no queue, no retry).
+        if not self._pool.try_acquire():
             log.info(
-                "[ocr] rapidocr single-flight busy; skip overlapping batch "
-                "frames=%d", len(frames))
+                "[ocr] all %d OCR threads busy; skip recognition frames=%d",
+                self._pool.max_threads, len(frames))
             return {}
         try:
-            engine = self._ensure_engine()
+            engine = self._pool.ensure_engine()
             # 置信度阈值: 与 window_text.py 保持一致 (0.5), 低于此丢碎字。
             min_conf = 0.5
             out: Dict[float, Dict[str, Any]] = {}
@@ -1264,7 +1237,7 @@ class RapidOCRClient:
                     }
             return out
         finally:
-            self._inference_lock.release()
+            self._pool.release()
 
     async def extract(
         self, frames: List[Frame], *,
@@ -1286,27 +1259,20 @@ class RapidOCRClient:
         return {}
 
 
-def build_ocr_client(cfg: Config) -> Any:
-    """Build the OCR client per config.model.ocr.use_local. OCR is ALWAYS ON
-    (v33: no ocr_enabled gate).
-      * use_local=True  → local_backend (rapidocr). Missing package → RAISE
-        (never silently fall back to the cloud backend the user didn't pick).
-      * use_local=False → remote_backend (qwen-vl-ocr over the configured endpoint).
+def build_ocr_client(cfg: Config) -> RapidOCRClient:
+    """Build the OCR client. OCR is ALWAYS ON (v33: no ocr_enabled gate).
+
+    RapidOCR (local, on-device PP-OCR via onnxruntime) is the ONLY OCR
+    backend — the remote/cloud VLM OCR path was removed. ``rapidocr`` and
+    ``onnxruntime`` are core dependencies, so a missing package here means a
+    broken install: RAISE (fail loudly) instead of silently degrading.
     """
-    use_local = bool(getattr(cfg, "ocr_use_local", True))
-    if use_local:
-        backend = (getattr(cfg, "ocr_backend", "") or "rapidocr").strip().lower()
-        backend = backend.replace("-", "_")
-        client = RapidOCRClient(cfg)
-        if client._missing_reason:
-            raise RuntimeError(
-                f"config model.ocr.use_local=true (local_backend={backend!r}), but "
-                f"{client._missing_reason}. Install dependencies with "
-                f"`pip install rapidocr onnxruntime`, or set "
-                f"model.ocr.use_local=false to use remote_backend.")
-        return client
-    # remote_backend: cloud VLM OCR over the configured endpoint.
-    return QwenVLOCRClient(cfg)
+    client = RapidOCRClient(cfg)
+    if client._missing_reason:
+        raise RuntimeError(
+            f"local OCR backend (rapidocr) unavailable: {client._missing_reason}. "
+            "Install dependencies with `pip install rapidocr onnxruntime`.")
+    return client
 
 
 class ScreenOCRWorker:
@@ -1331,9 +1297,10 @@ class ScreenOCRWorker:
         self.stop_event = stop_event
         self.ocr_client = build_ocr_client(cfg)
         # Background screen indexing and ask-time fallback share one client and
-        # one loop-owned gate.  Query OCR therefore waits for an ordinary
-        # in-flight batch instead of issuing a concurrent provider request.
-        self._extract_lock = asyncio.Lock()
+        # one process-wide thread pool.  The pool's non-blocking admission (up
+        # to ocr_max_threads concurrent inferences) replaces the old serializing
+        # asyncio gate: background + query OCR now overlap instead of queueing,
+        # and a saturated pool skips the request instead of blocking.
         self._done_ts: Set[float] = set()
         self._attempts: Dict[float, int] = {}
         self._last_source_skip_log = 0.0
@@ -1478,7 +1445,7 @@ class ScreenOCRWorker:
         is_screen = self._frame_is_screen_source(selected[-1])
         if is_screen:
             interval = max(0.2, float(
-                getattr(self.cfg, "ocr_worker_interval", 1.0) or 1.0))
+                getattr(self.cfg, "ocr_worker_interval", 3.0) or 3.0))
             first_ts = min(float(fr.ts) for fr in selected)
             start_ts = min(first_ts, float(ask_ts)) - max(0.5, interval)
             try:
@@ -1519,33 +1486,25 @@ class ScreenOCRWorker:
             # frozen capture is the best temporal match to the user's question.
             selected = [selected[-1]]
 
-        timeout_sec = float(getattr(self.cfg, "ocr_timeout_sec", 4.0) or 4.0)
+        timeout_sec = float(getattr(self.cfg, "ocr_timeout_sec", 8.0) or 8.0)
         max_tokens = int(getattr(self.cfg, "ocr_max_tokens", 1200) or 1200)
-        # Supplemental OCR must not queue behind a dense background screen
-        # batch for its full timeout and then spend another full timeout.
+        # Supplemental OCR must not block behind a dense background screen
+        # batch: the client's shared pool admits it concurrently (up to
+        # ocr_max_threads) and SKIPS immediately when every thread is busy.
         try:
-            await asyncio.wait_for(
-                self._extract_lock.acquire(), timeout=min(0.2, timeout_sec))
+            results = await asyncio.wait_for(
+                self.ocr_client.extract(
+                    selected,
+                    max_tokens=max_tokens,
+                    timeout_sec=timeout_sec,
+                ),
+                timeout=max(0.1, timeout_sec),
+            )
         except asyncio.TimeoutError:
-            log.info("[query-ocr] shared OCR worker busy; skip ask-time OCR")
-            return []
-        try:
-            try:
-                results = await asyncio.wait_for(
-                    self.ocr_client.extract(
-                        selected,
-                        max_tokens=max_tokens,
-                        timeout_sec=timeout_sec,
-                    ),
-                    timeout=max(0.1, timeout_sec),
-                )
-            except asyncio.TimeoutError:
-                log.warning(
-                    "[query-ocr] total deadline exceeded frames=%d timeout=%.1fs",
-                    len(selected), timeout_sec)
-                results = {}
-        finally:
-            self._extract_lock.release()
+            log.warning(
+                "[query-ocr] total deadline exceeded frames=%d timeout=%.1fs",
+                len(selected), timeout_sec)
+            results = {}
         evidence_source = (
             "synchronous_screen_fallback"
             if is_screen else "synchronous_camera_ocr"
@@ -1654,12 +1613,14 @@ class ScreenOCRWorker:
                 frames, winax_results, source_override="winax")
 
         if ocr_frames:
-            async with self._extract_lock:
-                results = await self.ocr_client.extract(
-                    ocr_frames,
-                    max_tokens=int(getattr(self.cfg, "ocr_max_tokens", 1200) or 1200),
-                    timeout_sec=float(getattr(self.cfg, "ocr_timeout_sec", 4.0) or 4.0),
-                )
+            # No serializing gate here: the client's shared pool admits this
+            # batch concurrently (up to ocr_max_threads) and skips it entirely
+            # when every OCR thread is busy (no retry this wake).
+            results = await self.ocr_client.extract(
+                ocr_frames,
+                max_tokens=int(getattr(self.cfg, "ocr_max_tokens", 1200) or 1200),
+                timeout_sec=float(getattr(self.cfg, "ocr_timeout_sec", 8.0) or 8.0),
+            )
             n_written += self._persist_results(ocr_frames, results or {})
         max_attempts = max(1, int(
             getattr(self.cfg, "ocr_worker_max_attempts", 3) or 3))
@@ -1726,7 +1687,7 @@ class ScreenOCRWorker:
             return
 
         interval = max(0.2, float(
-            getattr(self.cfg, "ocr_worker_interval", 1.0) or 1.0))
+            getattr(self.cfg, "ocr_worker_interval", 3.0) or 3.0))
         log.info(
             "[ocr-worker] started model=%s interval=%.2fs frames_per_wake=%s",
             getattr(self.ocr_client, "model", "unknown"), interval,

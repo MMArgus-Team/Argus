@@ -159,25 +159,16 @@ def _probe_deep_research(cfg: Any) -> Dict[str, Any]:
 
 
 def _probe_memory(cfg: Any) -> Dict[str, Any]:
-    """Memory backend needs an OCR path. Default ocr_use_local=True → requires
-    the `rapidocr` package (missing it makes MemoryBackend refuse to start —
-    silently, in the logs only). ocr_use_local=False → needs a remote OCR
-    endpoint configured instead."""
-    use_local = bool(_get(cfg, "ocr_use_local", True))
-    if use_local:
-        if _module_installed("rapidocr"):
-            return _cap("memory", "记忆 (本地 OCR)", OK, required=True)
-        return _cap(
-            "memory", "记忆 (本地 OCR)", BROKEN, required=True,
-            reason="ocr_use_local=true 但 rapidocr 未安装 → 记忆后端拒绝启动",
-            fix='uv pip install -e ".[web,ocr]"  (或设 ocr_use_local=false 走远端 OCR)')
-    # Remote OCR path: needs an endpoint + key.
-    if _has(_get(cfg, "ocr_base_url", ""), _get(cfg, "ocr_api_key", "")):
-        return _cap("memory", "记忆 (远端 OCR)", OK, required=True)
+    """Memory backend needs a local OCR path. RapidOCR (rapidocr + onnxruntime)
+    is the only OCR backend — remote/cloud VLM OCR was removed — and both
+    packages are now core dependencies. A missing package means a broken
+    install: MemoryBackend refuses to start (silently, in the logs only)."""
+    if _module_installed("rapidocr"):
+        return _cap("memory", "记忆 (本地 OCR)", OK, required=True)
     return _cap(
-        "memory", "记忆 (远端 OCR)", MISSING, required=True,
-        reason="ocr_use_local=false 但未配远端 OCR 端点 (ocr_base_url/ocr_api_key)",
-        fix="填 config.yaml 的 ocr_base_url/ocr_api_key/ocr_model,或改用 ocr_use_local=true")
+        "memory", "记忆 (本地 OCR)", BROKEN, required=True,
+        reason="rapidocr 未安装 → 记忆后端拒绝启动",
+        fix='uv pip install -e ".[web]"  (rapidocr/onnxruntime 是必装依赖)')
 
 
 def _voice_intent_local_path(raw_cfg: Any) -> str:
@@ -589,39 +580,19 @@ def _probe_aux_text_remote(raw_cfg: Any, *, downgraded: bool) -> Dict[str, Any]:
 
 
 def _probe_aux_ocr(cfg: Any, raw_cfg: Any) -> List[Dict[str, Any]]:
+    """Local rapidocr availability. Remote/cloud VLM OCR was removed — there is
+    no endpoint path anymore; rapidocr+onnxruntime are core dependencies."""
+    del raw_cfg
     caps: List[Dict[str, Any]] = []
-    use_local = bool(getattr(cfg, "ocr_use_local", None)) if cfg is not None \
-        else _nested_bool(raw_cfg, "model", "ocr", "use_local", default=True)
-    if use_local:
-        if _module_installed("rapidocr") or _module_installed("rapidocr_onnxruntime"):
-            caps.append(_cap(
-                "aux_ocr_local", "本地 OCR (rapidocr)", OK, required=True))
-        else:
-            caps.append(_cap(
-                "aux_ocr_local", "本地 OCR (rapidocr)", MISSING,
-                required=True,
-                reason="ocr_use_local=true 但 rapidocr 未安装。MemoryBackend 会跳过 OCR 但仍启动。",
-                fix="uv pip install rapidocr onnxruntime,"
-                    "或改 config.yaml auxiliary.ocr.use_local=false 切换到远端 VLM。"))
+    if _module_installed("rapidocr") or _module_installed("rapidocr_onnxruntime"):
+        caps.append(_cap(
+            "aux_ocr_local", "本地 OCR (rapidocr)", OK, required=True))
     else:
-        base = str(getattr(cfg, "ocr_base_url", "") or "") if cfg is not None else ""
-        if not base:
-            base = _nested_str(raw_cfg, "model", "ocr", "base_url")
-        if not base:
-            caps.append(_cap(
-                "aux_ocr_endpoint", "远端 OCR 端点", MISSING,
-                required=True,
-                reason="ocr_use_local=false 但未配远端 ocr_base_url",
-                fix="填 config.yaml model.ocr.base_url/api_key/model,或改 use_local=true"))
-        else:
-            ok, reason = _tcp_reachable(base, _TCP_DEFAULT_TIMEOUT)
-            caps.append(_cap(
-                "aux_ocr_endpoint", "远端 OCR 端点",
-                OK if ok else BROKEN,
-                required=True,
-                reason="" if ok else f"{base} 不可达: {reason}",
-                fix="" if ok else "检查 model.ocr.base_url 或远端服务是否启动。",
-                url=base, tcp_error=(reason if not ok else "")))
+        caps.append(_cap(
+            "aux_ocr_local", "本地 OCR (rapidocr)", MISSING,
+            required=True,
+            reason="rapidocr 未安装。MemoryBackend 会跳过 OCR 但仍启动。",
+            fix="uv pip install rapidocr onnxruntime (rapidocr/onnxruntime 是必装依赖)"))
     return caps
 
 

@@ -319,7 +319,7 @@ def _detect_model_family(model: str) -> str:
 
 
 def _get_current_model() -> tuple:
-    """Read current model and provider from Hermes config.yaml.
+    """Read current model and provider from Argus config.yaml.
     Returns (model_str, base_url)."""
     if not CONFIG_PATH.exists():
         return None, None

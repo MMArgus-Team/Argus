@@ -3196,7 +3196,7 @@ def _filter_suspicious_mcp_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
 
 
 def _load_mcp_config() -> Dict[str, dict]:
-    """Read ``mcp_servers`` from the Hermes config file.
+    """Read ``mcp_servers`` from the Argus config file.
 
     Returns a dict of ``{server_name: server_config}`` or empty dict.
     Server config can contain either ``command``/``args``/``env`` for stdio

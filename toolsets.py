@@ -106,8 +106,12 @@ _HERMES_CORE_TOOLS = [
     "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
-    # Computer use (macOS, gated on cua-driver being installed via check_fn)
-    "computer_use",
+    # NOTE: computer_use is deliberately NOT here. Desktop control via
+    # cua-driver is an explicit opt-in capability: it lives in its own
+    # `computer_use` toolset, is off by default (_DEFAULT_OFF_TOOLSETS), and
+    # the gateway only enables it when the computer-use skill is explicitly
+    # preloaded (tui_gateway/server.py::_make_agent). Keeping it off the core
+    # list keeps every default CLI/messaging/cron schema narrow.
 ]
 
 # Webhook events may originate from untrusted third-party content (for example,

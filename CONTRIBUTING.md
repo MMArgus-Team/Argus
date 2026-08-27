@@ -176,14 +176,37 @@ ln -sf "$(pwd)/venv/bin/argus" ~/.local/bin/argus
 
 ### Run tests
 
+First make sure the venv has the dev/test extras (pytest lives in `[dev]`,
+not core deps, so a bare `uv sync` won't have it):
+
 ```bash
-# Preferred — matches CI (hermetic env, 4 xdist workers); see AGENTS.md
+uv sync --extra all --extra dev        # or: uv pip install -e ".[all,dev]"
+```
+
+Then run the wrapper — it matches CI exactly (hermetic env, per-file
+isolation, TZ/LANG/PYTHONHASHSEED pinned, credential env vars dropped):
+
+```bash
+# POSIX / Git Bash on Windows — auto-detects both venv layouts
+# (`.venv/bin` and `.venv/Scripts`), so it works natively in MSYS too.
 scripts/run_tests.sh
+
+# Native Windows (PowerShell 7), no bash required:
+pwsh scripts/run_tests.ps1
+
+# Scope to a directory or single file:
+scripts/run_tests.sh tests/agent/
+scripts/run_tests.sh tests/foo.py -- --tb=long
 
 # Alternative (activate the venv first). The wrapper is still recommended
 # for parity with GitHub Actions before you open a PR:
 pytest tests/ -v
 ```
+
+`scripts/run_tests.sh` and `scripts/run_tests.ps1` are two front-ends to the
+same `scripts/run_tests_parallel.py` core; both fail fast with the exact
+`uv sync --extra all --extra dev` command when pytest is missing.
+
 
 ---
 

@@ -126,6 +126,14 @@ dependencies = [
   # NumPy on their normal runtime paths. Keep it in core so a default Argus
   # install and the `[all]` CI profile can import `agent.multimodal` reliably.
   "numpy==2.4.3",
+  # Local OCR (RapidOCR / PP-OCR on onnxruntime) is the ONLY OCR backend and
+  # the multimodal memory subsystem requires it — the remote/cloud VLM OCR
+  # path was removed, so these are REQUIRED (not an optional extra) packages.
+  # rapidocr ships its PP-OCR onnx models inside the wheel (no manual weight
+  # download); onnxruntime provides the CPU inference engine. Both ship
+  # manylinux/macOS/Windows wheels, so they're safe in the base install.
+  "rapidocr==3.9.2",
+  "onnxruntime==1.28.0",
   # Windows log rotation. Stdlib ``RotatingFileHandler.doRollover()`` uses
   # ``os.rename()`` which fails with ``PermissionError [WinError 32]`` on
   # Windows whenever any other process holds an append-mode handle on
@@ -173,8 +181,10 @@ wecom = ["defusedxml==0.7.1"]
 cli = ["simple-term-menu==1.6.6"]
 tts-premium = ["elevenlabs==1.59.0"]
 voice = [
-  # Local STT pulls in wheel-only transitive deps (ctranslate2, onnxruntime),
-  # so keep it out of the base install for source-build packagers like Homebrew.
+  # Local STT pulls in wheel-only transitive deps (ctranslate2), so keep it
+  # out of the base install for source-build packagers like Homebrew.
+  # (onnxruntime, mentioned here historically, is now a CORE dependency —
+  # local OCR needs it — and no longer a reason to keep `voice` out.)
   "faster-whisper==1.2.1",
   "sounddevice==0.5.5",
 ]
@@ -191,7 +201,12 @@ honcho = ["honcho-ai==2.0.1"]
 # CLI under prompt_toolkit (#40490). This extra is kept as a no-op back-compat
 # alias so existing `pip install mm-argus[vision]` invocations still resolve.
 vision = []
-ocr = ["rapidocr==3.9.2", "onnxruntime==1.28.0"]
+# Local OCR (rapidocr + onnxruntime) is now a CORE dependency — the multimodal
+# memory subsystem requires it and there is no remote OCR backend anymore.
+# This extra is kept as a no-op back-compat alias so existing
+# `pip install mm-argus[ocr]` / `pip install -e ".[web,ocr]"` invocations
+# still resolve.
+ocr = []
 # CVE-2026-48710 (BadHost): Starlette is pulled transitively by mcp's
 # sse-starlette / HTTP-SSE stack (and by fastapi in the `web` extra). Before
 # 1.0.1, a malformed Host header makes `request.url.path` desync from the path
@@ -309,10 +324,6 @@ argus = "argus_cli.main:main"
 argus-agent = "run_agent:main"
 argus-acp = "acp_adapter.entry:main"
 mm-argus = "run_agent:main"
-# Backward-compatible entry points inherited from Hermes Agent.
-hermes = "hermes_cli.main:main"
-hermes-agent = "run_agent:main"
-hermes-acp = "acp_adapter.entry:main"
 
 [tool.setuptools]
 py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajectory_compressor", "toolset_distributions", "cli", "hermes_bootstrap", "hermes_constants", "hermes_state", "hermes_time", "hermes_logging", "utils", "mcp_serve"]

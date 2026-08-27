@@ -1,4 +1,11 @@
-import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
+// KaTeX is a hard dependency of web/ (see web/package.json). It MUST be a
+// static import — a dynamic ``import(/* @vite-ignore */ "katex")`` with a
+// variable specifier stays in the browser bundle verbatim, the browser cannot
+// resolve the bare specifier at runtime, and every LaTeX block would degrade
+// to raw TeX even though the package ships with the app.
+import katex from "katex";
+import "katex/dist/katex.min.css";
 
 /**
  * Lightweight markdown renderer for LLM output.
@@ -536,32 +543,10 @@ const InlineContent = memo(function InlineContent({
 });
 
 /**
- * Render a LaTeX snippet with KaTeX. KaTeX is loaded lazily and cached; if the
- * package isn't installed (run `npm install katex` in web/), we degrade to the
+ * Render a LaTeX snippet with KaTeX. KaTeX is statically imported (hard
+ * dependency), so rendering is synchronous; a render error degrades to the
  * raw TeX in a mono span rather than crash or show nothing.
  */
-// Typed as `any` so this compiles whether or not the optional `katex` package
-// is installed (run `npm install katex` in web/ to enable rendered math).
-let _katexMod: any = null;
-let _katexLoad: Promise<void> | null = null;
-function _ensureKatex(): Promise<void> {
-  if (_katexMod) return Promise.resolve();
-  if (!_katexLoad) {
-    // @vite-ignore + variable specifier keeps the bundler from hard-failing the
-    // build when katex isn't present; the import just rejects → raw-TeX fallback.
-    const katexPkg = "katex";
-    const katexCss = "katex/dist/katex.min.css";
-    _katexLoad = import(/* @vite-ignore */ katexPkg)
-      .then((m: any) => {
-        _katexMod = m.default || m;
-        return import(/* @vite-ignore */ katexCss).catch(() => undefined);
-      })
-      .then(() => { /* css best-effort */ })
-      .catch(() => { _katexMod = null; });
-  }
-  return _katexLoad;
-}
-
 const KatexMath = memo(function KatexMath({
   tex,
   display,
@@ -569,30 +554,20 @@ const KatexMath = memo(function KatexMath({
   tex: string;
   display: boolean;
 }) {
-  const [html, setHtml] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    _ensureKatex().then(() => {
-      if (!alive) return;
-      if (!_katexMod) { setFailed(true); return; }
-      try {
-        const out = _katexMod.renderToString(tex, {
-          displayMode: display,
-          throwOnError: false,
-          output: "html",
-        });
-        setHtml(out);
-      } catch {
-        setFailed(true);
-      }
-    });
-    return () => { alive = false; };
+  const html = useMemo(() => {
+    try {
+      return katex.renderToString(tex, {
+        displayMode: display,
+        throwOnError: false,
+        output: "html",
+      });
+    } catch {
+      return null;
+    }
   }, [tex, display]);
 
-  // Fallback: KaTeX unavailable or render error → show raw TeX (never blank).
-  if (failed || html === null) {
+  // Fallback: render error → show raw TeX (never blank).
+  if (html === null) {
     return (
       <code className={display
         ? "block my-1 bg-secondary/40 px-2 py-1 text-xs font-mono"

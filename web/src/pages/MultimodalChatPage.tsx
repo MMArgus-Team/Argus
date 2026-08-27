@@ -440,7 +440,7 @@ interface CropItem {
 
 // One readable "segment" of a deep-research run — a single analysis round,
 // rendered as a card: 🎬 第N段 [mm:ss–mm:ss] → 👁 看到 → 🔎/🧩 检索 → 📝 就绪.
-interface BgSegment {
+export interface BgSegment {
   seg: number;                    // segment/round index (1-based for display)
   tsRange?: [number, number];     // frame time range for the header
   scene?: string;                 // 场景标记 (后端从本段 thought 廉价提取, 标题行展示)
@@ -945,7 +945,7 @@ const _mmWelcomeMsg = (): ChatMsg => ({
 });
 const ChatComposer = memo(function ChatComposer({
   micState, onSend, onSlash, gw, onMicToggle, generating, onStop,
-  ttsEnabled, onTtsToggle,
+  ttsEnabled, onTtsToggle, composerApiRef,
 }: {
   micState: MicLifecycleState;
   onSend: (text: string) => void;
@@ -957,11 +957,20 @@ const ChatComposer = memo(function ChatComposer({
   onStop: () => void;
   ttsEnabled: boolean;
   onTtsToggle: () => void;
+  // Lets the parent (slash pipeline /undo prefill) set the composer text.
+  composerApiRef?: React.MutableRefObject<{
+    setText: (text: string) => void;
+  } | null>;
 }) {
   const { t } = useI18n();
   const [askText, setAskText] = useState("");
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const slashRef = useRef<SlashPopoverHandle>(null);
+  // Register the stable setter so the parent can prefill the composer
+  // (e.g. /undo drops the backed-up user turn back in for editing).
+  useLayoutEffect(() => {
+    if (composerApiRef) composerApiRef.current = { setText: setAskText };
+  }, [composerApiRef]);
   const submit = () => {
     const txt = askText.trim();
     if (!txt) return;
@@ -2387,7 +2396,7 @@ const LiveMarkdown = memo(function LiveMarkdown({ content }: { content: string }
 
 // One readable analysis-round card: 🎬 第N段 [mm:ss–mm:ss] → 👁 看到 →
 // 🔎/🧩 检索 → 🖼 crops → 📝 就绪. Mirrors the desktop SegmentCard.
-const SegmentCard = memo(function SegmentCard({ s, defaultOpen, terminal }: {
+export const SegmentCard = memo(function SegmentCard({ s, defaultOpen, terminal }: {
   s: BgSegment; defaultOpen?: boolean;
   /** 整个深度研究已结束 → 空段不能再写"分析中…"(它永远不会再有内容了)。 */
   terminal?: boolean;
@@ -2552,7 +2561,7 @@ function WaitingBanner({ waiting }: { waiting: NonNullable<BgItem["waiting"]> })
   );
 }
 
-const DeepWindow = memo(function DeepWindow({
+export const DeepWindow = memo(function DeepWindow({
   rid, item, msgs, model, expanded, onToggle,
 }: {
   rid: string;
@@ -2996,7 +3005,7 @@ const ChatColumn = memo(function ChatColumn({
   rows, renderRow, itemKey, atBottom, chatScrollRef, onChatScroll, scrollChatToBottom,
   chatAtBottomRef, isRecordingUI, asrPartial, asrBuffer,
   micState, ttsEnabled, onTtsToggle,
-  generating, onStop, onSend, onSlash, gw, onMicToggle,
+  generating, onStop, onSend, onSlash, gw, onMicToggle, composerApiRef,
 }: {
   rows: Row[];
   renderRow: (i: number, row: Row) => React.ReactNode;
@@ -3018,6 +3027,9 @@ const ChatColumn = memo(function ChatColumn({
   onSlash: (command: string) => void;
   gw: GatewayClient | null;
   onMicToggle: () => void;
+  composerApiRef?: React.MutableRefObject<{
+    setText: (text: string) => void;
+  } | null>;
 }) {
   useLocaleRevision();  // labels come from translateNow — see AsrBar
   // ★ 自动跟随底部 (替代 Virtuoso followOutput)。仅当用户原本就在底部才下拉。
@@ -3062,6 +3074,7 @@ const ChatColumn = memo(function ChatColumn({
         onSlash={onSlash}
         gw={gw}
         onMicToggle={onMicToggle}
+        composerApiRef={composerApiRef}
       />
     </Card>
   );
@@ -3826,6 +3839,9 @@ export default function MultimodalChatPage() {
   // a session for the same `?mm=new` navigation.
   const sessionEstablishedRef = useRef(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // Slash pipeline /undo prefill → ChatComposer's setAskText (registered on
+  // mount via composerApiRef).
+  const composerApiRef = useRef<{ setText: (text: string) => void } | null>(null);
   // Phase 10: route message.* events by key (request_id / monitor_id / __main__)
   // so concurrent RouterEngine delegations + multi-monitor SPEAKs land in
   // distinct bubbles. Key "__main__" is the regular main-agent turn bubble.
@@ -3913,6 +3929,9 @@ export default function MultimodalChatPage() {
   // Which deep-research sub-window is expanded (request_id). Only the newest is
   // open by default; clicking a title toggles. null = default (newest open).
   const [deepExpanded, setDeepExpanded] = useState<string | null>(null);
+  // ★ 用户一旦显式点击过窗口头, 后台 bg flush 的"自动展开最新窗口"就不再抢焦点 ——
+  //   否则完成前的拖尾事件会把用户刚点开的旧窗口又顶回最新窗口 ("点开又被关回去")。
+  const deepExpandedUserPinned = useRef(false);
   const [monitors, setMonitors] = useState<MonitorReg[]>([]);
   // 右侧面板底部 toast (监控/深度研究过程失败/停用), 3s 后自动移除。不进 history、不发主气泡。
   const [mmToasts, setMmToasts] = useState<{ id: string; level: string; text: string }[]>([]);
@@ -4263,6 +4282,7 @@ export default function MultimodalChatPage() {
     setAnchorFrames([]);
     setCtx({ version: 0, obs: [], audioObs: [], facts: {} });
     setDeepExpanded(null);
+    deepExpandedUserPinned.current = false;
     setFrameCount(0);
     setAsrPartial("");
     setAsrBuffer([]);
@@ -4273,8 +4293,11 @@ export default function MultimodalChatPage() {
   // ★ 性能: 稳定的 rid 折叠回调 (每个 DeepWindow 复用同一个函数引用 → 不破坏 memo)。
   //   旧代码在 .map 里为每个 window 现造 () => setDeepExpanded(...), 每次父渲染都换
   //   新 onToggle identity → 所有 DeepWindow memo 失效、全部重渲染。
-  const toggleDeepWindow = useCallback(
-    (rid: string) => setDeepExpanded((cur) => (cur === rid ? "" : rid)), []);
+  //   ★ 用户显式交互: 置 pin, 此后后台自动展开不再覆盖 (见 runBgFlush)。
+  const toggleDeepWindow = useCallback((rid: string) => {
+    deepExpandedUserPinned.current = true;
+    setDeepExpanded((cur) => (cur === rid ? "" : rid));
+  }, []);
   const toggleMonitorCollapsed = useCallback((mid: string) => {
     setMonitorCollapsed((prev) => {
       const next = new Set(prev);
@@ -5335,7 +5358,11 @@ export default function MultimodalChatPage() {
       if (bgPendingExpandRid !== null) {
         const rid = bgPendingExpandRid;
         bgPendingExpandRid = null;
-        setDeepExpanded((cur) => (cur === "" ? cur : rid));
+        // ★ 用户已显式点过窗口头 → 保持用户选择 (包括 "" 折叠哨兵), 不再自动追新。
+        //   未交互时自动展开最新窗口, 仅在用户折叠过 (cur === "") 时尊重折叠。
+        if (!deepExpandedUserPinned.current) {
+          setDeepExpanded((cur) => (cur === "" ? cur : rid));
+        }
       }
     };
     // Multimodal monitor registry push (set_monitor CRUD result).
@@ -6831,6 +6858,9 @@ export default function MultimodalChatPage() {
       callbacks: {
         sys: (text: string) => addMsg({ id: nid(), role: "system", text }),
         send: (message: string) => sendAsk(message),
+        // /undo returns {type:"prefill"}: drop the backed-up user turn into
+        // the composer so it can be edited and resubmitted.
+        prefill: (message: string) => composerApiRef.current?.setText(message),
       },
     });
   }, [addMsg, sendAsk]);
@@ -6943,6 +6973,7 @@ export default function MultimodalChatPage() {
           return [item, ...prev.filter((b) => (b.requestId || b.id) !== rid)].slice(-8);
         });
         setDeepExpanded(rid);   // 强制展开该窗口
+        deepExpandedUserPinned.current = true;  // 用户显式重开 → 不再被自动展开顶走
       })
       .catch(() => { /* best-effort */ });
   }, []);
@@ -7149,6 +7180,7 @@ export default function MultimodalChatPage() {
           onSlash={runSlash}
           gw={refs.current.gw}
           onMicToggle={onMicToggle}
+          composerApiRef={composerApiRef}
         />
         </ChatSessionContext.Provider>
 

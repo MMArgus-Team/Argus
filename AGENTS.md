@@ -1249,11 +1249,17 @@ def profile_env(tmp_path, monkeypatch):
 
 ## Testing
 
-**ALWAYS use `scripts/run_tests.sh`** — do not call `pytest` directly. The script enforces
+**ALWAYS use `scripts/run_tests.sh`** (or its native Windows twin
+`scripts/run_tests.ps1`) — do not call `pytest` directly. The script enforces
 hermetic environment parity with CI (unset credential vars, TZ=UTC, LANG=C.UTF-8,
-`-n auto` xdist workers, in-tree subprocess-isolation plugin). Direct `pytest`
+per-file subprocess isolation, in-tree subprocess-isolation plugin). Direct `pytest`
 on a 16+ core developer machine with API keys set diverges from CI in ways
 that have caused multiple "works locally, fails in CI" incidents (and the reverse).
+`run_tests.sh` auto-detects both POSIX (`bin/activate`) and Windows
+(`Scripts/activate`) venv layouts, so it works from Git Bash / MSYS on Windows;
+`run_tests.ps1` is the no-bash PowerShell equivalent. Both fail fast with the
+exact `uv sync --extra all --extra dev` command when pytest (a `[dev]` extra)
+is missing.
 
 ```bash
 scripts/run_tests.sh                                  # full suite, CI-parity
@@ -1261,6 +1267,8 @@ scripts/run_tests.sh tests/gateway/                   # one directory
 scripts/run_tests.sh tests/agent/test_foo.py::test_x  # one test
 scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
 scripts/run_tests.sh --no-isolate tests/foo/          # disable subprocess isolation (faster, for debugging)
+# Windows (no bash):
+pwsh scripts/run_tests.ps1
 ```
 
 ### Subprocess-per-test isolation

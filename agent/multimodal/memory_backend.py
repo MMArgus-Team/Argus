@@ -1181,10 +1181,10 @@ class MemoryBackend:
                 task_state_store=self.task_state_store)
             if self._build_stop_requested("MemoryWriter"):
                 return False
-            # ScreenOCRWorker builds its OCR client here. If use_local=true
-            # (local_backend=rapidocr) but the package is missing, build_ocr_client
-            # raises — fail loudly (like vision_ability) instead of silently
-            # degrading to a cloud backend the user never chose.
+            # ScreenOCRWorker builds its OCR client here. RapidOCR (local) is
+            # the only backend; rapidocr+onnxruntime are core deps, so a missing
+            # package means a broken install — build_ocr_client raises and we
+            # fail loudly (like vision_ability) instead of silently degrading.
             try:
                 self.screen_ocr_worker = ScreenOCRWorker(
                     cfg, buf, self.frame_store, self.screen_text_store,
@@ -2051,10 +2051,9 @@ class MemoryBackend:
             except Exception as exc:
                 log.debug("[mm-memory] %s client close failed: %s", label, exc)
 
-        # Remote QwenVLOCR owns an AsyncOpenAI transport on this backend loop.
-        # The default local RapidOCR client has no ``client`` field, so this is
-        # naturally a no-op for local OCR.  Identity de-duping keeps defensive
-        # teardown idempotent.
+        # OCR client teardown: RapidOCRClient owns no transport (local on-device
+        # inference; the remote QwenVLOCR transport was removed), so this is a
+        # no-op today — kept defensively idempotent for future OCR backends.
         ocr_worker = getattr(self, "screen_ocr_worker", None)
         ocr_client = getattr(ocr_worker, "ocr_client", None)
         ocr_transport = getattr(ocr_client, "client", None)
@@ -2160,7 +2159,7 @@ class MemoryBackend:
         if worker is None:
             return
         interval = max(0.2, float(
-            getattr(self.cfg, "ocr_worker_interval", 1.0) or 1.0))
+            getattr(self.cfg, "ocr_worker_interval", 3.0) or 3.0))
         model = str(getattr(worker.ocr_client, "model", "unknown") or "unknown")
         if not getattr(worker.ocr_client, "enabled", False):
             await self._emit_worker_progress("OCRWorker", {

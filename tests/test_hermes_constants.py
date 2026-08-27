@@ -38,7 +38,7 @@ class TestGetDefaultHermesRoot:
         assert get_default_hermes_root() == tmp_path / ".argus"
 
     def test_hermes_home_is_native(self, tmp_path, monkeypatch):
-        """When HERMES_HOME = ~/.argus, returns ~/.argus."""
+        """When ARGUS_HOME = ~/.argus, returns ~/.argus."""
         native = tmp_path / ".argus"
         native.mkdir()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -46,7 +46,7 @@ class TestGetDefaultHermesRoot:
         assert get_default_hermes_root() == native
 
     def test_hermes_home_is_profile(self, tmp_path, monkeypatch):
-        """When HERMES_HOME is a profile under ~/.argus, returns ~/.argus."""
+        """When ARGUS_HOME is a profile under ~/.argus, returns ~/.argus."""
         native = tmp_path / ".argus"
         profile = native / "profiles" / "coder"
         profile.mkdir(parents=True)
@@ -55,7 +55,7 @@ class TestGetDefaultHermesRoot:
         assert get_default_hermes_root() == native
 
     def test_hermes_home_is_docker(self, tmp_path, monkeypatch):
-        """When HERMES_HOME points outside ~/.argus (Docker), returns HERMES_HOME."""
+        """When ARGUS_HOME points outside ~/.argus (Docker), returns ARGUS_HOME."""
         docker_home = tmp_path / "opt" / "data"
         docker_home.mkdir(parents=True)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -63,7 +63,7 @@ class TestGetDefaultHermesRoot:
         assert get_default_hermes_root() == docker_home
 
     def test_hermes_home_is_custom_path(self, tmp_path, monkeypatch):
-        """Any HERMES_HOME outside ~/.argus is treated as the root."""
+        """Any ARGUS_HOME outside ~/.argus is treated as the root."""
         custom = tmp_path / "my-hermes-data"
         custom.mkdir()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -71,7 +71,7 @@ class TestGetDefaultHermesRoot:
         assert get_default_hermes_root() == custom
 
     def test_docker_profile_active(self, tmp_path, monkeypatch):
-        """When a Docker profile is active (HERMES_HOME=<root>/profiles/<name>),
+        """When a Docker profile is active (ARGUS_HOME=<root>/profiles/<name>),
         returns the Docker root, not the profile dir."""
         docker_root = tmp_path / "opt" / "data"
         profile = docker_root / "profiles" / "coder"
@@ -126,13 +126,17 @@ class TestGetHermesHome:
 
         assert get_hermes_home() == canonical
 
-    def test_legacy_hermes_home_remains_supported(self, tmp_path, monkeypatch):
+    def test_legacy_hermes_home_env_is_ignored(self, tmp_path, monkeypatch):
+        """The legacy HERMES_HOME env var is no longer honored: only ARGUS_HOME
+        (or the platform default when unset) resolves the home."""
         legacy = tmp_path / "legacy"
         monkeypatch.delenv("ARGUS_HOME", raising=False)
         monkeypatch.setenv("HERMES_HOME", str(legacy))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(hermes_constants.sys, "platform", "posix")
 
-        assert get_hermes_home() == legacy
-        assert get_default_hermes_root() == legacy
+        assert get_hermes_home() == tmp_path / ".argus"
+        assert get_default_hermes_root() == tmp_path / ".argus"
 
 
 class TestHermesManagedNode:

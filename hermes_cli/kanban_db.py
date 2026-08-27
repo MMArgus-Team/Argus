@@ -7610,7 +7610,7 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
         return toolsets or None
     except Exception as exc:
         _log.debug(
-            "kanban worker: could not resolve CLI toolsets for HERMES_HOME=%r (%s)",
+            "kanban worker: could not resolve CLI toolsets for ARGUS_HOME=%r (%s)",
             hermes_home,
             exc,
         )

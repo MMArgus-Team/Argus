@@ -85,12 +85,12 @@ def test_deep_research_ok_config(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# memory (REQUIRED) — local OCR needs rapidocr; remote needs an endpoint
+# memory (REQUIRED) — local OCR (rapidocr) is the only backend
 # --------------------------------------------------------------------------- #
 def test_memory_broken_when_rapidocr_absent(monkeypatch):
     _clear_mm_env(monkeypatch)
     monkeypatch.setattr(R, "_module_installed", lambda name: False)
-    m = _cap(R.probe_mm_readiness({"ocr_use_local": True}), "memory")
+    m = _cap(R.probe_mm_readiness({}), "memory")
     assert m["status"] == R.BROKEN
     assert m["required"] is True
     assert "rapidocr" in m["reason"].lower()
@@ -99,22 +99,8 @@ def test_memory_broken_when_rapidocr_absent(monkeypatch):
 def test_memory_ok_when_rapidocr_present(monkeypatch):
     _clear_mm_env(monkeypatch)
     monkeypatch.setattr(R, "_module_installed", lambda name: name == "rapidocr")
-    m = _cap(R.probe_mm_readiness({"ocr_use_local": True}), "memory")
+    m = _cap(R.probe_mm_readiness({}), "memory")
     assert m["status"] == R.OK
-
-
-def test_memory_remote_missing_endpoint(monkeypatch):
-    _clear_mm_env(monkeypatch)
-    m = _cap(R.probe_mm_readiness({"ocr_use_local": False}), "memory")
-    assert m["status"] == R.MISSING
-    assert m["required"] is True
-
-
-def test_memory_remote_ok_with_endpoint(monkeypatch):
-    _clear_mm_env(monkeypatch)
-    r = R.probe_mm_readiness(
-        {"ocr_use_local": False, "ocr_base_url": "http://x", "ocr_api_key": "k"})
-    assert _cap(r, "memory")["status"] == R.OK
 
 
 # --------------------------------------------------------------------------- #
@@ -212,14 +198,14 @@ def test_ready_true_when_required_ok_despite_optional_missing(monkeypatch):
     # (voice/search/weights/torch) missing but optional.
     monkeypatch.setattr(R, "_module_installed",
                         lambda name: name == "rapidocr")
-    r = R.probe_mm_readiness({"ocr_use_local": True})
+    r = R.probe_mm_readiness({})
     assert r["ready"] is True
 
 
 def test_ready_false_when_required_broken(monkeypatch):
     _clear_mm_env(monkeypatch)
     monkeypatch.setattr(R, "_module_installed", lambda name: False)
-    r = R.probe_mm_readiness({"ocr_use_local": True})
+    r = R.probe_mm_readiness({})
     assert r["ready"] is False
 
 

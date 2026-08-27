@@ -564,13 +564,13 @@ def test_s6_register_creates_service_dir_and_triggers_scan(
     log_run = svc_dir / "log" / "run"
     assert log_run.is_file()
     log_text = log_run.read_text()
-    # CRITICAL: HERMES_HOME must be a runtime env-var expansion, NOT
+    # CRITICAL: ARGUS_HOME must be a runtime env-var expansion, NOT
     # a Python-substituted absolute path. Negative-assert the wrong
     # form so future regressions are caught.
-    assert "$HERMES_HOME" in log_text
+    assert "$ARGUS_HOME" in log_text
     assert "logs/gateways/coder" in log_text
     assert "/opt/data/logs/gateways/coder" not in log_text, (
-        "log_dir was hard-coded; must use ${HERMES_HOME} at run time"
+        "log_dir was hard-coded; must use ${ARGUS_HOME} at run time"
     )
     # `1` action directive forwards lines to stdout BEFORE the file
     # destination so the supervised gateway's stdout (including the
@@ -1075,14 +1075,14 @@ def test_s6_log_run_chowns_gateways_parent(s6_scandir, fake_subprocess_run) -> N
 
     log_text = (s6_scandir / "gateway-coder" / "log" / "run").read_text()
 
-    parent_chown = 'chown hermes:hermes "$HERMES_HOME/logs/gateways"'
+    parent_chown = 'chown hermes:hermes "$ARGUS_HOME/logs/gateways"'
     assert parent_chown in log_text, (
         "log/run must chown the logs/gateways parent so profiles added "
         f"after a root-context boot can create their leaf dirs. Saw: {log_text!r}"
     )
     # Non-recursive on purpose: sibling profile leaf dirs are each managed
     # by their own log/run; a recursive parent chown would race them.
-    assert 'chown -R hermes:hermes "$HERMES_HOME/logs/gateways"' not in log_text
+    assert 'chown -R hermes:hermes "$ARGUS_HOME/logs/gateways"' not in log_text
 
     # Ordering: mkdir creates the parent, then the parent chown repairs its
     # ownership, then the leaf chown — all before s6-log execs.

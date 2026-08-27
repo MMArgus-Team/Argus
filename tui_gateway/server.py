@@ -6239,10 +6239,11 @@ def _make_agent(
     agent_cfg = cfg.get("agent") or {}
     system_prompt = _prompt_text(agent_cfg.get("system_prompt", ""))
     startup_skills = _parse_tui_skills_env()
+    loaded_skills: list[str] = []
     if startup_skills:
         from agent.skill_commands import build_preloaded_skills_prompt
 
-        skills_prompt, _loaded_skills, missing_skills = build_preloaded_skills_prompt(
+        skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(
             startup_skills,
             task_id=session_id or key,
         )
@@ -6306,6 +6307,29 @@ def _make_agent(
             "target_model": model or None,
         })
     _pr = _load_provider_routing()
+    # Computer use (desktop control via cua-driver) is an EXPLICIT opt-in
+    # capability: it lives in its own `computer_use` toolset (removed from
+    # _HERMES_CORE_TOOLS, off by default via _DEFAULT_OFF_TOOLSETS) and is
+    # only enabled here when the computer-use skill is explicitly preloaded
+    # (ARGUS_TUI_SKILLS=computer-use, or an identifier resolving to it).
+    enabled_toolsets = _load_enabled_toolsets()
+    disabled_toolsets = None
+    _cu_skill_preloaded = any(
+        str(s or "").strip().lower() in {"computer-use", "computer_use"}
+        for s in (*startup_skills, *loaded_skills)
+    )
+    if enabled_toolsets is not None:
+        if _cu_skill_preloaded:
+            if "computer_use" not in enabled_toolsets:
+                enabled_toolsets = [*enabled_toolsets, "computer_use"]
+        else:
+            filtered = [t for t in enabled_toolsets if t != "computer_use"]
+            if len(filtered) != len(enabled_toolsets):
+                enabled_toolsets = filtered
+    elif not _cu_skill_preloaded:
+        # enabled_toolsets=None expands to EVERY toolset; the only way to keep
+        # the opt-in tool out of that expansion is an explicit disabled entry.
+        disabled_toolsets = ["computer_use"]
     return AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -6332,7 +6356,8 @@ def _make_agent(
             if service_tier_override is not None
             else _load_service_tier()
         ),
-        enabled_toolsets=_load_enabled_toolsets(),
+        enabled_toolsets=enabled_toolsets,
+        disabled_toolsets=disabled_toolsets,
         # OpenRouter provider-routing prefs (config.yaml `provider_routing`).
         # Mirrors the messaging gateway + CLI so the desktop/TUI honors the same
         # routing instead of letting OpenRouter pick providers at random.

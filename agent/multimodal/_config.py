@@ -180,21 +180,19 @@ class Config:
     recall_frame_vector_topk: int = 8         # search_frames_by_text 默认召回数
     frame_vector_pool_cap: int = 0          # 帧向量候选池上限 (帧量≈micro×3)
     # ★ OCR: screen-text extraction before MemoryWriter (ALWAYS ON, v33 — no
-    #   ocr_enabled gate). use_local=True → local_backend (rapidocr, no endpoint);
-    #   False → remote_backend (cloud VLM OCR via ocr_provider/base_url/api_key/model).
-    #   ocr_provider/base_url/api_key/model = the remote_backend endpoint;
-    #   ocr_backend = the local_backend name (rapidocr).
-    ocr_use_local: bool = True
-    ocr_provider: str = ""
-    ocr_base_url: str = ""
-    ocr_api_key: str = ""
-    ocr_model: str = ""
+    #   ocr_enabled gate). Local-only: RapidOCR/PP-OCR on onnxruntime, no
+    #   endpoint/credential needed (rapidocr+onnxruntime are core deps). The
+    #   remote/cloud VLM OCR path (ocr_use_local / ocr_provider/base_url/api_key/
+    #   model) was removed — ocr_backend is the local backend name (rapidocr).
+    #   ocr_max_threads: 单实例共享引擎的并发线程上限 (全忙 → 跳过本次识别不重试);
+    #   ocr_worker_interval: 后台 worker 触发周期 (3s); ocr_timeout_sec: 单次超时.
     ocr_backend: str = "rapidocr"
-    ocr_timeout_sec: float = 4.0
+    ocr_timeout_sec: float = 8.0
     ocr_max_tokens: int = 1200
     ocr_frames_per_wake: int = 4
     ocr_max_side: int = 0
-    ocr_worker_interval: float = 1.0
+    ocr_max_threads: int = 8
+    ocr_worker_interval: float = 3.0
     ocr_worker_backlog_limit: int = 12
     ocr_worker_max_attempts: int = 3
     # MemoryReviewer may use a dedicated endpoint/model. Empty fields fall back
