@@ -23,6 +23,9 @@ import importlib
 import pytest
 
 
+_USER_ONLY_MODEL = "test-provider/user-only-model"
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Ensure the two env-var gates start AND end each test in a known state.
@@ -66,13 +69,13 @@ class TestIgnoreUserConfigEnvGate:
         return cli.load_cli_config
 
     def test_user_config_loaded_when_flag_unset(self, tmp_path, monkeypatch):
-        self._write_user_config(tmp_path, "anthropic/claude-sonnet-4.6")
+        self._write_user_config(tmp_path, _USER_ONLY_MODEL)
         load_cli_config = self._reload_cli(monkeypatch, tmp_path)
 
         cfg = load_cli_config()
 
         # User config value wins
-        assert cfg["model"]["default"] == "anthropic/claude-sonnet-4.6"
+        assert cfg["model"]["default"] == _USER_ONLY_MODEL
         assert cfg["agent"]["system_prompt"] == "from user config"
 
     def test_user_config_skipped_when_flag_set(self, tmp_path, monkeypatch):
@@ -81,8 +84,7 @@ class TestIgnoreUserConfigEnvGate:
         The built-in default ``model.default`` is empty string (no user override),
         and the user's ``agent.system_prompt`` is not seen.
         """
-        user_only_model = "anthropic/claude-sonnet-4.6"
-        self._write_user_config(tmp_path, user_only_model)
+        self._write_user_config(tmp_path, _USER_ONLY_MODEL)
         monkeypatch.setenv("ARGUS_IGNORE_USER_CONFIG", "1")
 
         load_cli_config = self._reload_cli(monkeypatch, tmp_path)
@@ -94,18 +96,18 @@ class TestIgnoreUserConfigEnvGate:
         # User-set model.default MUST NOT leak through — either the built-in
         # default ("" or unset) or a project-level fallback, but never the
         # user's value
-        assert cfg["model"].get("default", "") != user_only_model
+        assert cfg["model"].get("default", "") != _USER_ONLY_MODEL
 
     def test_flag_ignored_when_set_to_other_value(self, tmp_path, monkeypatch):
         """Only the literal value "1" activates the bypass, matching the yolo pattern."""
-        self._write_user_config(tmp_path, "anthropic/claude-sonnet-4.6")
+        self._write_user_config(tmp_path, _USER_ONLY_MODEL)
         monkeypatch.setenv("ARGUS_IGNORE_USER_CONFIG", "true")  # not "1"
 
         load_cli_config = self._reload_cli(monkeypatch, tmp_path)
         cfg = load_cli_config()
 
         # "true" != "1", so user config IS loaded
-        assert cfg["model"]["default"] == "anthropic/claude-sonnet-4.6"
+        assert cfg["model"]["default"] == _USER_ONLY_MODEL
 
 
 class TestIgnoreRulesEnvGate:
