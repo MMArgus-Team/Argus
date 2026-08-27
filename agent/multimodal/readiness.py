@@ -85,19 +85,6 @@ def _module_installed(name: str) -> bool:
         return False
 
 
-def _installed_version(name: str) -> Optional[str]:
-    """Return an installed distribution's version string, or None. Uses
-    importlib.metadata so we don't import the package itself."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version
-        try:
-            return version(name)
-        except PackageNotFoundError:
-            return None
-    except Exception:
-        return None
-
-
 def _cap(key: str, label: str, status: str, *, required: bool,
          reason: str = "", fix: str = "") -> Dict[str, Any]:
     return {
@@ -171,85 +158,6 @@ def _probe_memory(cfg: Any) -> Dict[str, Any]:
         fix='uv pip install -e ".[web]"  (rapidocr/onnxruntime 是必装依赖)')
 
 
-def _voice_intent_local_path(raw_cfg: Any) -> str:
-    """Resolve the configured local voice-intent weights path the SAME way the
-    runtime does: ``config.auxiliary.voice_intent.local_path`` (a nested dict —
-    NOT a flat Config field), else empty. This is the real source; the flat
-    Config dataclass does not expose it."""
-    if isinstance(raw_cfg, dict):
-        aux = raw_cfg.get("auxiliary")
-        if isinstance(aux, dict):
-            vi = aux.get("voice_intent")
-            if isinstance(vi, dict):
-                p = vi.get("local_path")
-                if isinstance(p, str) and p.strip():
-                    return p.strip()
-    return ""
-
-
-def _probe_local_models(cfg: Any, raw_cfg: Any = None) -> Dict[str, Any]:
-    """Local voice-intent model weights (BitCPM4-0.5B). Optional: absent →
-    intent classification falls back to cloud/heuristic.
-
-    The configured path lives at ``auxiliary.voice_intent.local_path`` in the
-    nested config (read from ``raw_cfg``), matching voice_intent_local.py. When
-    unset the runtime falls back to ``$HERMES_HOME/models/bitcpm4-0.5b`` and then
-    to the project ``weights/bitcpm4-0.5b`` — we check the same candidates."""
-    configured = _voice_intent_local_path(raw_cfg)
-    home = os.environ.get("ARGUS_HOME", "")
-
-    candidates: List[str] = []
-    if configured:
-        candidates.append(configured)
-        if home and not os.path.isabs(configured):
-            candidates.append(os.path.join(home, configured))
-    # Runtime fallbacks (voice_intent_local.default_local_model_dir + project weights).
-    if home:
-        candidates.append(os.path.join(home, "models", "bitcpm4-0.5b"))
-        candidates.append(os.path.join(home, "weights", "bitcpm4-0.5b"))
-    candidates.append("weights/bitcpm4-0.5b")
-
-    for c in candidates:
-        try:
-            if c and os.path.isdir(c) and os.listdir(c):
-                return _cap("local_models", "本地权重 (BitCPM4)", OK, required=False)
-        except OSError:
-            continue
-    shown = configured or "weights/bitcpm4-0.5b (默认)"
-    return _cap(
-        "local_models", "本地权重 (BitCPM4)", MISSING, required=False,
-        reason=f"未找到本地权重目录 ({shown})",
-        fix="python download_weights.py")
-
-
-def _probe_vision_deps() -> Dict[str, Any]:
-    """torch/torchvision must be version-matched or torchvision fails to
-    register ops (torchvision::nms) and ALL YOLO/DINOv3 tracking silently dies.
-    This is the documented crash trap — surface it explicitly."""
-    if not _module_installed("torch"):
-        return _cap(
-            "vision_deps", "追踪 (torch/torchvision)", MISSING, required=False,
-            reason="未安装 torch (实体追踪不可用)",
-            fix="pip install torch==2.5.1 torchvision==0.20.1")
-    if not _module_installed("torchvision"):
-        return _cap(
-            "vision_deps", "追踪 (torch/torchvision)", MISSING, required=False,
-            reason="未安装 torchvision",
-            fix="pip install torchvision==0.20.1  (须匹配 torch 版本)")
-    tv = _installed_version("torchvision")
-    tc = _installed_version("torch")
-    # Known-good pairing for this project: torch 2.5.x ↔ torchvision 0.20.x.
-    if tc and tv:
-        tc_mm = ".".join(tc.split(".")[:2])
-        tv_mm = ".".join(tv.split(".")[:2])
-        if tc_mm == "2.5" and tv_mm != "0.20":
-            return _cap(
-                "vision_deps", "追踪 (torch/torchvision)", BROKEN, required=False,
-                reason=f"torch {tc} 需要 torchvision 0.20.x,实际 {tv} → nms 不注册,追踪全崩",
-                fix="pip install torchvision==0.20.1")
-    return _cap("vision_deps", "追踪 (torch/torchvision)", OK, required=False)
-
-
 def _probe_capture_perms() -> Dict[str, Any]:
     """OS-level screen/mic/camera permissions can't be reliably introspected
     here (and can't be granted programmatically). Report unknown with a
@@ -285,8 +193,6 @@ def probe_mm_readiness(cfg: Any = None, raw_cfg: Any = None,
         _probe_voice(cfg),
         _probe_deep_research(cfg),
         _probe_memory(cfg),
-        _probe_local_models(cfg, raw_cfg),
-        _probe_vision_deps(),
         _probe_capture_perms(),
     ]
     if deep:

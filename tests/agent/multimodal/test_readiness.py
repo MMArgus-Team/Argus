@@ -104,82 +104,6 @@ def test_memory_ok_when_rapidocr_present(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# local_models (optional) — weights dir existence; path comes from the nested
-# raw config (auxiliary.voice_intent.local_path), NOT a flat Config field.
-# HERMES_HOME is pointed at an empty tmp dir so the runtime fallbacks
-# (HERMES_HOME/models, HERMES_HOME/weights) and the project weights/ dir don't
-# leak a false OK.
-# --------------------------------------------------------------------------- #
-def _raw(local_path):
-    return {"auxiliary": {"voice_intent": {"local_path": local_path}}}
-
-
-def test_local_models_missing(monkeypatch, tmp_path):
-    _clear_mm_env(monkeypatch)
-    monkeypatch.setenv("ARGUS_HOME", str(tmp_path / "home"))
-    monkeypatch.chdir(tmp_path)  # so relative "weights/..." fallback misses too
-    r = R.probe_mm_readiness(None, _raw(str(tmp_path / "nope")))
-    assert _cap(r, "local_models")["status"] == R.MISSING
-
-
-def test_local_models_ok(monkeypatch, tmp_path):
-    _clear_mm_env(monkeypatch)
-    monkeypatch.setenv("ARGUS_HOME", str(tmp_path / "home"))
-    d = tmp_path / "bitcpm4"
-    d.mkdir()
-    (d / "config.json").write_text("{}", encoding="utf-8")
-    r = R.probe_mm_readiness(None, _raw(str(d)))
-    assert _cap(r, "local_models")["status"] == R.OK
-
-
-def test_local_models_reads_nested_path_not_flat_field(monkeypatch, tmp_path):
-    # Regression for the field-name bug: the path must come from the nested
-    # auxiliary.voice_intent.local_path, and a bogus flat field is ignored.
-    _clear_mm_env(monkeypatch)
-    monkeypatch.setenv("ARGUS_HOME", str(tmp_path / "home"))
-    monkeypatch.chdir(tmp_path)
-    d = tmp_path / "w"
-    d.mkdir()
-    (d / "model.bin").write_text("x", encoding="utf-8")
-    # flat field is a red herring; only the nested raw path counts.
-    r = R.probe_mm_readiness({"local_backend_path": str(tmp_path / "nope")},
-                             _raw(str(d)))
-    assert _cap(r, "local_models")["status"] == R.OK
-
-
-# --------------------------------------------------------------------------- #
-# vision_deps (optional) — the torch/torchvision version-mismatch trap
-# --------------------------------------------------------------------------- #
-def test_vision_deps_missing_torch(monkeypatch):
-    _clear_mm_env(monkeypatch)
-    monkeypatch.setattr(R, "_module_installed", lambda name: False)
-    v = _cap(R.probe_mm_readiness({}), "vision_deps")
-    assert v["status"] == R.MISSING
-
-
-def test_vision_deps_broken_on_version_mismatch(monkeypatch):
-    _clear_mm_env(monkeypatch)
-    monkeypatch.setattr(R, "_module_installed", lambda name: True)
-
-    def _ver(name):
-        return {"torch": "2.5.1", "torchvision": "0.28.0"}.get(name)
-    monkeypatch.setattr(R, "_installed_version", _ver)
-    v = _cap(R.probe_mm_readiness({}), "vision_deps")
-    assert v["status"] == R.BROKEN
-    assert "torchvision" in v["reason"]
-
-
-def test_vision_deps_ok_on_matched_versions(monkeypatch):
-    _clear_mm_env(monkeypatch)
-    monkeypatch.setattr(R, "_module_installed", lambda name: True)
-
-    def _ver(name):
-        return {"torch": "2.5.1", "torchvision": "0.20.1"}.get(name)
-    monkeypatch.setattr(R, "_installed_version", _ver)
-    assert _cap(R.probe_mm_readiness({}), "vision_deps")["status"] == R.OK
-
-
-# --------------------------------------------------------------------------- #
 # capture_perms (optional) — always unknown (can't introspect OS grants)
 # --------------------------------------------------------------------------- #
 def test_capture_perms_unknown(monkeypatch):
@@ -214,8 +138,7 @@ def test_report_shape_is_stable(monkeypatch):
     r = R.probe_mm_readiness({})
     assert set(r.keys()) == {"ready", "capabilities"}
     keys = {c["key"] for c in r["capabilities"]}
-    assert keys == {"voice", "deep_research", "memory",
-                    "local_models", "vision_deps", "capture_perms"}
+    assert keys == {"voice", "deep_research", "memory", "capture_perms"}
     for c in r["capabilities"]:
         assert set(c.keys()) == {
             "key", "label", "status", "required", "reason", "fix"}

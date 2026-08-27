@@ -2609,7 +2609,7 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
 
 
 # =============================================================================
-# Section: Multimodal (voice / deep-research / memory / tracking)
+# Section: Multimodal (voice / deep-research / memory)
 # =============================================================================
 
 
@@ -2631,8 +2631,8 @@ def _mm_print_report(report: dict) -> None:
 
 
 def setup_multimodal(config: dict):
-    """Configure the multimodal subsystem (voice / deep-research / memory /
-    tracking) so it's actually usable, then re-check and report.
+    """Configure the multimodal subsystem (voice / deep-research / memory)
+    so it's actually usable, then re-check and report.
 
     Writes keys to the config paths ``flatten_mm_config`` reads
     (``audio.dashscope_api_key``, the ``model.*.anysearch`` block). For
@@ -2643,8 +2643,8 @@ def setup_multimodal(config: dict):
     """
     from agent.multimodal.readiness import OK, probe_mm_readiness
 
-    print_header("Multimodal (voice / deep-research / memory / tracking)")
-    print_info("配置多模态能力,让语音 / 深研 / 记忆 / 追踪真正可用。")
+    print_header("Multimodal (voice / deep-research / memory)")
+    print_info("配置多模态能力,让语音 / 深研 / 记忆真正可用。")
     print()
 
     # Build the real Config so the probe reflects on-disk state + this session's
@@ -2707,16 +2707,6 @@ def setup_multimodal(config: dict):
             _mm_pip_install(['.[web]'])
     else:
         print_info("记忆: rapidocr 已安装。")
-
-    # ---- 本地权重 (Qwen2.5-0.5B-Instruct) --------------------------------
-    print()
-    from agent.multimodal.readiness import _probe_local_models
-    if _probe_local_models(cfg_obj, config)["status"] != OK:
-        print_info("本地语音意图模型权重缺失 (可选 — 缺失时回退云端/启发式)。")
-        if prompt_yes_no("现在下载权重 (python download_weights.py)?", default=False):
-            _mm_run_download_weights()
-    else:
-        print_info("本地权重: 已就绪。")
 
     # ---- 采集权限 (OS 级,只能指引) -------------------------------------
     print()
@@ -2781,22 +2771,6 @@ def _mm_pip_install(targets: list) -> None:
             print_error(f"  安装失败 (exit {rc}) — 请手动运行上面的命令。")
     except Exception as exc:
         print_error(f"  安装出错: {exc} — 请手动运行上面的命令。")
-
-
-def _mm_run_download_weights() -> None:
-    """Best-effort weight download using the CURRENT interpreter (sys.executable
-    → same venv the CLI runs in), so weights land where the runtime looks."""
-    import subprocess
-    import sys
-    print_info(f"  运行: {sys.executable} download_weights.py")
-    try:
-        rc = subprocess.call([sys.executable, "download_weights.py"])
-        if rc == 0:
-            print_success("  权重下载完成。")
-        else:
-            print_error(f"  下载失败 (exit {rc}) — 请手动运行: {sys.executable} download_weights.py")
-    except Exception as exc:
-        print_error(f"  下载出错: {exc} — 请手动运行 python download_weights.py。")
 
 
 # =============================================================================
