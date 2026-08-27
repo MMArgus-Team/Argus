@@ -211,18 +211,16 @@ model:
   # ── OCR (screen-share 文字抽取, 必开) ──
   # 仅本地 RapidOCR (rapidocr+onnxruntime 是必装依赖, 无端点/密钥)。
   # 单实例多线程: 进程共享一个引擎, 最多 max_threads 并发; 全忙 → 跳过本次识别不重试。
+  # 事件驱动: 每保留 frames_between_ocr 张新帧 → 识别最新 1 帧 (无定时器, 静止画面
+  # 不产生新帧 → 自然不识别)。每次识别只送 1 帧; 多次识别结果按时间戳排序。
   ocr:
     local_backend:
       backend: "rapidocr"          # 本地 OCR (无端点)
-    timeout_sec: 8.0               # 单次识别超时
+    timeout_sec: 10.0              # 单次识别超时
     max_tokens: 1200
-    frames_per_wake: 1
     max_side: 1536
-    max_threads: 8                 # 并发识别线程上限
-    worker:
-      interval: 3.0                # 后台 OCR 触发周期 (秒)
-      backlog_limit: 12
-      max_attempts: 3
+    max_threads: 12                # 并发识别线程上限
+    frames_between_ocr: 4          # 每保留 N 张新帧识别一次 (取最新帧)
 
 # ── Auxiliary clients ──
 # vision: vision_analyze 工具 + 浏览器截图分析。text: 文本改写 + 语音意图分诊。

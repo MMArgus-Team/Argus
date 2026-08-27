@@ -242,19 +242,26 @@ def test_query_ocr_skips_quickly_when_ocr_pool_is_saturated():
 
 
 def test_rapidocr_saturated_pool_never_touches_the_engine():
-    client = _real_client()
-    for _ in range(client.max_threads):
-        assert client._pool.try_acquire() is True
-    try:
-        result = client._extract_sync([
-            Frame(ts=1.0, jpeg_b64="raw", source_type="camera")])
-    finally:
+    async def _case():
+        client = _real_client(max_threads=2)
         for _ in range(client.max_threads):
-            client._pool.release()
-    assert result == {}
-    # The skip happens BEFORE ensure_engine(): a saturated pool must not pay
-    # the model-load cost (or start another inference) for a skipped batch.
-    assert client._pool._engine is None
+            assert client._pool.try_acquire() is True
+        try:
+            # Every frame's admission is rejected at the extract layer —
+            # saturated slots are skipped (no queue/retry), engine never loads.
+            result = await client.extract(
+                [Frame(ts=1.0, jpeg_b64="raw", source_type="camera"),
+                 Frame(ts=2.0, jpeg_b64="raw", source_type="camera")],
+                max_tokens=0, timeout_sec=1.0)
+        finally:
+            for _ in range(client.max_threads):
+                client._pool.release()
+        assert result == {}
+        # The skip happens BEFORE ensure_engine(): a saturated pool must not pay
+        # the model-load cost (or start another inference) for skipped frames.
+        assert client._pool._engine is None
+
+    asyncio.run(_case())
 
 
 def test_rapidocr_timeout_thread_holds_slot_but_other_threads_still_run():

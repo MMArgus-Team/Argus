@@ -185,16 +185,16 @@ class Config:
     #   remote/cloud VLM OCR path (ocr_use_local / ocr_provider/base_url/api_key/
     #   model) was removed — ocr_backend is the local backend name (rapidocr).
     #   ocr_max_threads: 单实例共享引擎的并发线程上限 (全忙 → 跳过本次识别不重试);
-    #   ocr_worker_interval: 后台 worker 触发周期 (3s); ocr_timeout_sec: 单次超时.
+    #   ocr_timeout_sec: 单次识别超时。
+    #   Event-driven: OCR 由"新保留帧计数"触发 (每 ocr_frames_between_ocr 帧
+    #   识别最新 1 帧), 无定时器、无尝试上限 — 静止画面不产生新帧 → 自然不识别。
     ocr_backend: str = "rapidocr"
-    ocr_timeout_sec: float = 8.0
+    ocr_timeout_sec: float = 10.0
     ocr_max_tokens: int = 1200
-    ocr_frames_per_wake: int = 4
     ocr_max_side: int = 0
-    ocr_max_threads: int = 8
-    ocr_worker_interval: float = 3.0
+    ocr_max_threads: int = 12
+    ocr_frames_between_ocr: int = 4
     ocr_worker_backlog_limit: int = 12
-    ocr_worker_max_attempts: int = 3
     # MemoryReviewer may use a dedicated endpoint/model. Empty fields fall back
     # to model.memory so deployments that want Writer/Recall/Reviewer unified
     # keep the old behavior.

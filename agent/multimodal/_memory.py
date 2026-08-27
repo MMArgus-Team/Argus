@@ -404,6 +404,15 @@ class FrameBuffer:
         )
         self._monitor_dq: Deque[Frame] = deque(maxlen=monitor_maxlen)
         self._lock = threading.Lock()
+        # ★ Screen OCR event-driven trigger: OCR is driven by NEW retained
+        #   frames, not a wall-clock timer. Every frame that passes entry dedup
+        #   bumps a counter; when it reaches ``ocr_frames_between_ocr`` (default
+        #   4) the OCR worker is woken to recognize the newest frame. Static
+        #   scenes never accumulate retained frames → OCR naturally stays quiet,
+        #   no attempt cap needed. The counter/condition live under _lock and
+        #   are notified from push_live/push.
+        self._frames_since_ocr: int = 0
+        self._ocr_cond = threading.Condition(self._lock)
         # 入口去重状态。阈值可被 set_dhash_threshold 动态调整 (场景理解)。
         self._dhash_threshold: int = int(
             getattr(cfg, "framebuffer_dhash_threshold_init", 6) or 6)
@@ -446,6 +455,13 @@ class FrameBuffer:
                     return False  # 与最近某帧几乎一样 → 丢弃, 不入 buffer
             self._recent_dhash.append(cur)
         self._dq.append(frame)
+        # Event-driven OCR trigger: every NEW retained frame counts toward the
+        # next recognition; hit the threshold → wake the OCR worker. The caller
+        # holds _lock (Condition(_lock)), so notify() is legal here.
+        self._frames_since_ocr += 1
+        ocr_gap = int(getattr(self.cfg, "ocr_frames_between_ocr", 4) or 4)
+        if self._frames_since_ocr >= max(1, ocr_gap):
+            self._ocr_cond.notify_all()
         return True
 
     def push(self, frame: Frame) -> None:
@@ -461,6 +477,11 @@ class FrameBuffer:
                         return
                 self._recent_dhash.append(cur)
             self._dq.append(frame)
+            # Same event-driven OCR trigger as _dedup_and_store (see push_live).
+            self._frames_since_ocr += 1
+            ocr_gap = int(getattr(self.cfg, "ocr_frames_between_ocr", 4) or 4)
+            if self._frames_since_ocr >= max(1, ocr_gap):
+                self._ocr_cond.notify_all()
 
     def push_live(self, jpeg_b64: str, source_type: str = "",
                   source_id: str = "", source_name: str = "") -> dict:
@@ -653,6 +674,26 @@ class FrameBuffer:
     def latest_one(self) -> Optional[Frame]:
         with self._lock:
             return self._dq[-1] if self._dq else None
+
+    def wait_ocr_turn(self, timeout: Optional[float] = None) -> bool:
+        """Block until enough NEW retained frames have arrived to trigger one
+        OCR recognition (``ocr_frames_between_ocr``, default 4), or until
+        *timeout* elapses. Returns True when a recognition turn is due.
+
+        Event-driven OCR: static scenes add no retained frames → this returns
+        False (after timeout) and the worker stays quiet — no timer, no attempt
+        cap. Caller should use a bounded timeout so shutdown/stops are honored.
+        """
+        gap = max(1, int(getattr(self.cfg, "ocr_frames_between_ocr", 4) or 4))
+        with self._ocr_cond:
+            return self._ocr_cond.wait_for(
+                lambda: self._frames_since_ocr >= gap, timeout=timeout)
+
+    def mark_ocr_done(self) -> None:
+        """Consume the pending OCR trigger after a recognition ran. Resets the
+        retained-frame counter so the next wake needs a fresh ``gap`` frames."""
+        with self._ocr_cond:
+            self._frames_since_ocr = 0
 
     def all_after(self, ts: float) -> List[Frame]:
         with self._lock:

@@ -649,9 +649,9 @@ _NUMERIC_KEYS = (
     "mm_embedding_dimensions", "mm_embedding_res_level",
     # ★ OCR 垂类模型: writer 前置屏幕文字抽取 (v33: ocr_enabled 删 → 必开;
     #   local-only rapidocr — remote/cloud VLM OCR 已移除)
-    "ocr_timeout_sec", "ocr_max_tokens", "ocr_frames_per_wake",
-    "ocr_max_side", "ocr_max_threads", "ocr_worker_interval",
-    "ocr_worker_backlog_limit", "ocr_worker_max_attempts",
+    "ocr_timeout_sec", "ocr_max_tokens",
+    "ocr_max_side", "ocr_max_threads", "ocr_frames_between_ocr",
+    "ocr_worker_backlog_limit",
     # Dedicated Monitor MaaS auth compatibility. Default False preserves the
     # exact client kwargs used by all existing endpoints.
     "monitor_send_api_key_header",
@@ -857,7 +857,6 @@ _DEEP_PATH_PREFIX = {
     "model.embedding.hybrid": "recall",           # hybrid.vector_topk → recall_vector_topk
     # ── model.ocr.* (scalars directly under role) → ocr_* ──
     "model.ocr": "ocr",
-    "model.ocr.worker": "ocr_worker",             # worker.interval → ocr_worker_interval
     # ── settings.* nested groups ──
     "settings.framebuffer": "framebuffer",
     "settings.scene_probe": "scene_probe",

@@ -2154,12 +2154,18 @@ class MemoryBackend:
             log.debug("[mm-memory] trajectory emit failed: %s", exc)
 
     async def _ocr_loop(self) -> None:
-        """Run screen OCR with an explicit, visible per-tick trajectory."""
+        """Run screen OCR with an explicit, visible per-tick trajectory.
+
+        Event-driven: waits for the FrameBuffer to accumulate enough NEW
+        retained frames (ocr_frames_between_ocr) before recognizing the newest
+        one — no wall-clock OCR interval. Static scenes produce no retained
+        frames → the loop stays quiet until the screen actually changes.
+        """
         worker = self.screen_ocr_worker
         if worker is None:
             return
-        interval = max(0.2, float(
-            getattr(self.cfg, "ocr_worker_interval", 3.0) or 3.0))
+        gap = max(1, int(
+            getattr(self.cfg, "ocr_frames_between_ocr", 4) or 4))
         model = str(getattr(worker.ocr_client, "model", "unknown") or "unknown")
         if not getattr(worker.ocr_client, "enabled", False):
             await self._emit_worker_progress("OCRWorker", {
@@ -2171,12 +2177,25 @@ class MemoryBackend:
                 await asyncio.sleep(1.0)
             return
         await self._emit_worker_progress("OCRWorker", {
-            "phase": "started", "model": model, "interval_sec": interval,
+            "phase": "started", "model": model,
+            "frames_between_ocr": gap,
             "scope": "screen_only",
         })
         last_idle_emit = 0.0
         last_idle_key = ""
         while not self._stop.is_set():
+            # Block until a fresh OCR turn is due (bounded wait so stop /
+            # source switches are honored promptly).
+            try:
+                due = await asyncio.to_thread(
+                    self.frame_buffer.wait_ocr_turn, 0.25)
+                if not due:
+                    continue
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(0.25)
+                continue
             t0 = time.time()
             source = str(getattr(
                 self.frame_buffer, "current_source_type", "") or "unknown")
@@ -2211,7 +2230,6 @@ class MemoryBackend:
                     "error": str(exc)[:500], "elapsed_sec": time.time() - t0,
                 })
                 log.warning("[ocr-worker] loop error: %s", exc)
-            await asyncio.sleep(interval)
 
     async def _writer_loop(self) -> None:
         cfg = self.cfg

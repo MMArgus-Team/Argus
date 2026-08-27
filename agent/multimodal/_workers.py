@@ -1207,13 +1207,9 @@ class RapidOCRClient:
         return _to_blocks(frags, img_w, img_h)
 
     def _extract_sync(self, frames: List[Frame]) -> Dict[float, Dict[str, Any]]:
-        # Single shared engine, up to max_threads concurrent inferences.  If
-        # every thread is busy → SKIP this recognition (no queue, no retry).
-        if not self._pool.try_acquire():
-            log.info(
-                "[ocr] all %d OCR threads busy; skip recognition frames=%d",
-                self._pool.max_threads, len(frames))
-            return {}
+        # Admission (pool slot) is done by the caller (extract) per frame — one
+        # recognition == one image == one thread slot. Here we just run the
+        # engine over the (single) frame handed to us.
         try:
             engine = self._pool.ensure_engine()
             # 置信度阈值: 与 window_text.py 保持一致 (0.5), 低于此丢碎字。
@@ -1242,20 +1238,55 @@ class RapidOCRClient:
         self, frames: List[Frame], *,
         max_tokens: int, timeout_sec: float,
     ) -> Dict[float, Dict[str, Any]]:
+        """Recognize each frame as its OWN inference (one thread each), run
+        concurrently, and return results ordered by frame timestamp.
+
+        One recognition == one image: a multi-frame batch is NOT packed into a
+        single serial loop. Each frame acquires one pool slot and runs in its
+        own ``asyncio.to_thread``; saturated slots are skipped (no queue/retry).
+        Results are keyed by frame ts and returned in ASCENDING ts order so a
+        slow old frame never lands after a fast new one.
+        """
         del max_tokens
         if not self.enabled or not frames:
             return {}
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self._extract_sync, frames),
-                timeout=max(0.1, float(timeout_sec or 4.0)),
-            )
-        except asyncio.TimeoutError:
-            log.warning("[ocr] rapidocr timeout frames=%d timeout=%.1fs",
-                        len(frames), float(timeout_sec or 4.0))
-        except Exception as e:
-            log.warning("[ocr] rapidocr failed: %s", e)
-        return {}
+        timeout = max(0.1, float(timeout_sec or 4.0))
+        # Stable ts order up front; gather preserves task order on completion,
+        # and we re-sort below regardless of which frame finishes first.
+        ordered = sorted(frames, key=lambda fr: float(fr.ts))
+        results: Dict[float, Dict[str, Any]] = {}
+
+        async def _one(fr: Frame) -> Optional[Dict[float, Dict[str, Any]]]:
+            # Per-frame admission: this inference occupies one thread slot.
+            if not self._pool.try_acquire():
+                log.info(
+                    "[ocr] all %d OCR threads busy; skip frame ts=%.1f",
+                    self._pool.max_threads, float(fr.ts))
+                return None
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._extract_sync, [fr]),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                log.warning("[ocr] rapidocr timeout frame ts=%.1f timeout=%.1fs",
+                            float(fr.ts), timeout)
+            except Exception as e:
+                log.warning("[ocr] rapidocr failed frame ts=%.1f: %s",
+                            float(fr.ts), e)
+            finally:
+                self._pool.release()
+            return None
+
+        # Run all frame recognitions concurrently; each is independent.
+        batch = await asyncio.gather(
+            *(_one(fr) for fr in ordered), return_exceptions=True)
+        for fr, part in zip(ordered, batch):
+            if not isinstance(part, dict) or not part:
+                continue
+            for k, v in part.items():
+                results[float(k)] = v
+        return results
 
 
 def build_ocr_client(cfg: Config) -> RapidOCRClient:
@@ -1300,8 +1331,6 @@ class ScreenOCRWorker:
         # to ocr_max_threads concurrent inferences) replaces the old serializing
         # asyncio gate: background + query OCR now overlap instead of queueing,
         # and a saturated pool skips the request instead of blocking.
-        self._done_ts: Set[float] = set()
-        self._attempts: Dict[float, int] = {}
         self._last_source_skip_log = 0.0
 
     def _ts_key(self, ts: float) -> float:
@@ -1323,28 +1352,24 @@ class ScreenOCRWorker:
         }
 
     def _select_frames(self) -> List[Frame]:
-        per_wake = max(1, int(getattr(self.cfg, "ocr_frames_per_wake", 1) or 1))
-        backlog = max(per_wake, int(
+        # Event-driven: called AFTER the buffer reports a fresh OCR turn (new
+        # retained frames >= ocr_frames_between_ocr). Recognize exactly the MOST
+        # RECENT eligible screen frame — one recognition == one image. No
+        # frames_per_wake, no attempt cap: static scenes don't accumulate
+        # retained frames so they never trigger a turn (see FrameBuffer
+        # wait_ocr_turn / _frames_since_ocr).
+        backlog = max(1, int(
             getattr(self.cfg, "ocr_worker_backlog_limit", 12) or 12))
-        max_attempts = max(1, int(
-            getattr(self.cfg, "ocr_worker_max_attempts", 3) or 3))
         frames = self.buf.latest(backlog)
-        candidates: List[Frame] = []
-        for fr in frames:
-            if not self._frame_is_screen(fr):
-                continue
-            key = self._ts_key(fr.ts)
-            if key in self._done_ts:
-                continue
-            if self._attempts.get(key, 0) >= max_attempts:
-                continue
-            candidates.append(fr)
+        candidates = [
+            fr for fr in frames
+            if self._frame_is_screen(fr)
+        ]
         if not candidates:
             return []
-        # Prefer the newest frames; old unimportant pages must not block the page
+        # Prefer the newest frame; old unimportant pages must not block the page
         # the user is looking at now.
-        candidates = candidates[-per_wake:]
-        return list(candidates)
+        return [candidates[-1]]
 
     def _result_for_frame(
         self, results: Dict[float, Dict[str, Any]], fr: Frame,
@@ -1443,10 +1468,12 @@ class ScreenOCRWorker:
 
         is_screen = self._frame_is_screen_source(selected[-1])
         if is_screen:
-            interval = max(0.2, float(
-                getattr(self.cfg, "ocr_worker_interval", 3.0) or 3.0))
+            # Look back a short window for already-indexed screen text rows.
+            # ocr_worker_interval was removed (event-driven OCR) — use a fixed
+            # 2s lookback, matching the old default trigger cadence.
+            lookback = 2.0
             first_ts = min(float(fr.ts) for fr in selected)
-            start_ts = min(first_ts, float(ask_ts)) - max(0.5, interval)
+            start_ts = min(first_ts, float(ask_ts)) - max(0.5, lookback)
             try:
                 rows = self.screen_text_store.search(
                     "",
@@ -1527,7 +1554,6 @@ class ScreenOCRWorker:
             app = str(item.get("app") or "").strip()
             title = str(item.get("window_title") or "").strip()
             if not (raw_text or blocks or app or title):
-                self._done_ts.add(key)
                 continue
             try:
                 fid = self.frame_store.maybe_store(
@@ -1558,19 +1584,19 @@ class ScreenOCRWorker:
                                 len(tables), fid)
                     except Exception as e:
                         log.warning("[ocr-worker] table rebuild failed: %s", e)
-                self._done_ts.add(key)
                 n_written += 1
             except Exception as e:
                 log.warning("[ocr-worker] persist failed: %s", e)
         return n_written
 
     async def process_once(self) -> int:
-        """Process one OCR batch if the current source is screen share.
+        """Process one OCR turn: recognize the newest frame (screen share).
 
-        Online mode calls this from ``run()`` on a wall-clock interval. Offline
-        eval calls it explicitly on the video timeline before writer wakes, so
+        Event-driven: ``run()`` calls this only after the buffer reports a fresh
+        OCR turn (new retained frames >= ocr_frames_between_ocr). Offline eval
+        calls it explicitly on the video timeline before writer wakes, so
         OCR/text/table memory lands before the writer/recall path reads it.
-        Returns the number of frame OCR records persisted in this batch.
+        Returns the number of frame OCR records persisted in this turn.
         """
         if not getattr(self.ocr_client, "enabled", False):
             return 0
@@ -1593,10 +1619,6 @@ class ScreenOCRWorker:
         if not frames:
             return 0
 
-        for fr in frames:
-            key = self._ts_key(fr.ts)
-            self._attempts[key] = self._attempts.get(key, 0) + 1
-
         t0 = time.time()
 
         # ── Part 3: AX/UIA 窗口抓取的机会 ─────────────────────────────────
@@ -1618,15 +1640,16 @@ class ScreenOCRWorker:
             results = await self.ocr_client.extract(
                 ocr_frames,
                 max_tokens=int(getattr(self.cfg, "ocr_max_tokens", 1200) or 1200),
-                timeout_sec=float(getattr(self.cfg, "ocr_timeout_sec", 8.0) or 8.0),
+                timeout_sec=float(getattr(self.cfg, "ocr_timeout_sec", 10.0) or 10.0),
             )
             n_written += self._persist_results(ocr_frames, results or {})
-        max_attempts = max(1, int(
-            getattr(self.cfg, "ocr_worker_max_attempts", 3) or 3))
-        for fr in frames:
-            key = self._ts_key(fr.ts)
-            if self._attempts.get(key, 0) >= max_attempts:
-                self._done_ts.add(key)
+        # Consume the trigger: this turn is done; the next one needs a fresh
+        # batch of retained frames. (No attempt cap — a static scene simply
+        # stops producing retained frames and never triggers again.)
+        try:
+            self.buf.mark_ocr_done()
+        except Exception:
+            pass
         if n_written:
             log.info(
                 "[ocr-worker] %.2fs frames=%d written=%d winax=%d ocr_model=%s",
@@ -1685,21 +1708,25 @@ class ScreenOCRWorker:
                 await asyncio.sleep(1.0)
             return
 
-        interval = max(0.2, float(
-            getattr(self.cfg, "ocr_worker_interval", 3.0) or 3.0))
+        gap = max(1, int(
+            getattr(self.cfg, "ocr_frames_between_ocr", 4) or 4))
         log.info(
-            "[ocr-worker] started model=%s interval=%.2fs frames_per_wake=%s",
-            getattr(self.ocr_client, "model", "unknown"), interval,
-            getattr(self.cfg, "ocr_frames_per_wake", 1),
+            "[ocr-worker] started model=%s frames_between_ocr=%d",
+            getattr(self.ocr_client, "model", "unknown"), gap,
         )
+        # Event-driven: block until the buffer accumulates enough NEW retained
+        # frames to trigger a recognition. Bounded timeout (0.25s) so stop /
+        # source switches are honored promptly; no wall-clock OCR interval.
         while not self.stop_event.is_set():
             try:
+                due = await asyncio.to_thread(self.buf.wait_ocr_turn, 0.25)
+                if not due:
+                    continue
                 await self.process_once()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.warning("[ocr-worker] loop error: %s", e)
-            await asyncio.sleep(interval)
 
 
 # ── v6: deep research 的原生 function-calling 工具 (取代手写 JSON 的 tool_calls/recall_tasks) ──
