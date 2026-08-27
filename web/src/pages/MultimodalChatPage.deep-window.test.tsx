@@ -111,7 +111,7 @@ describe("DeepWindow after completion", () => {
     // Simulate a trailing bg flush: same done item, new object identity.
     act(() => {
       root.render(
-        createElement(I18nProvider, { locale: "zh-Hans" },
+        createElement(I18nProvider, null,
           createElement(DeepWindow, {
             rid: "rid1", item: { ...item }, msgs: [], model: "test",
             expanded: true, onToggle: () => {},

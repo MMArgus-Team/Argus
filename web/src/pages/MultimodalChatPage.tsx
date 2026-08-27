@@ -458,7 +458,7 @@ export interface BgSegment {
   crops?: CropItem[];             // 🖼 crop thumbnails (image search)
 }
 
-interface BgItem {
+export interface BgItem {
   id: string;                     // one item per request_id
   requestId?: string;             // which RouterEngine delegation
   label?: string;                 // UI label (lightweight summary) for the card title

@@ -192,8 +192,7 @@ describe("executeSlash", () => {
     const g = gw(
       vi.fn().mockResolvedValue({ type: "prefill", message: "edit me" }),
     );
-    const cb = callbacks();
-    delete cb.prefill;
+    const cb = { sys: vi.fn(), send: vi.fn() };
     const result = await executeSlash({
       command: "/undo",
       sessionId: "s1",
