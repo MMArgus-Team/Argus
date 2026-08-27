@@ -164,12 +164,6 @@ RELEASE_v*.md
 # walkthroughs). Throwaway artifacts, never part of the app.
 apps/desktop/demo/
 
-# Local model weights (RapidOCR PP-OCRv5-small + Qwen2.5-0.5B-Instruct). Not tracked —
-# run `python download_weights.py` to fetch them into weights/. Only the
-# download script + weights/README.md live in git.
-weights/**
-!weights/README.md
-
 # ── 本批次清理 (评测数据/临时调试/IDE/大目录) ─────────────────────────
 # 批量评测的视频与产物 (test_0618 可达 100+GB, 绝不入库)
 test_0618/

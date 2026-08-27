@@ -15569,7 +15569,7 @@ def _get_voice_agent(session: dict):
     """Lazily build + cache the session's VoiceAgent (常驻语音交互 Agent)。
 
     ★ v2 已转正为唯一实现 (v1 VoiceAgent 已删)。绑定到 session 的 WatcherAgent (提供
-      TTS 播放通道 + asyncio loop) 与 auxiliary.voice_intent 专用客户端。意图判断、
+      TTS 播放通道 + asyncio loop) 与 auxiliary.text 远端客户端。意图判断、
       self/main_agent 分诊、是否播报和口播拟词统一走这一个低延迟模型。v2 内部通过 is_interactive()
       / is_speaker_on() 决定实际是否生效: 即使 asr/tts 没开, 实例仍构建、hook 仍进来,
       只是静默不入回播队列。引擎未就绪时返回 None。"""
@@ -15583,8 +15583,7 @@ def _get_voice_agent(session: dict):
         _cfg = _load_cfg() or {}
         voice_client, voice_model = None, ""
         try:
-            # 统一走 auxiliary.text 端点，用于 phrase_utterance 口播改写；
-            #   本地 Qwen2.5-0.5B 由 voice_intent_local 直接 transformers 推理, 不经此 client。
+            # 统一走 auxiliary.text.remote_backend，用于意图判断和口播改写。
             from agent.auxiliary_client import get_async_text_auxiliary_client
             voice_client, voice_model = get_async_text_auxiliary_client(
                 task="text")
@@ -17992,8 +17991,9 @@ def _(rid, params: dict) -> dict:
 
     Returns the ``probe_mm_readiness`` report. ``deep=true`` (default in the
     gateway, opt-out via ``probe_endpoints=false``) additionally runs LLM
-    endpoint TCP probes and kicks the Qwen2.5-0.5B background preload — everything
-    lives in readiness.py so there is one mental model for MM startup state.
+    endpoint TCP probes (including auxiliary.text.remote_backend) and checks
+    the local OCR package — everything lives in readiness.py so there is one
+    mental model for MM startup state.
 
     Shape:
       {"ready": bool, "capabilities": [{key,label,status,required,reason,fix, ...}]}

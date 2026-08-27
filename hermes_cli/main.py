@@ -11658,7 +11658,6 @@ def cmd_dashboard(args):
         from hermes_cli.config_sync import (
             normalize_config_shapes,
             sync_project_config,
-            sync_project_weights,
         )
         sync_project_config()
         # Collapse ambiguous config shapes right after the copy (the copy is what
@@ -11666,9 +11665,6 @@ def cmd_dashboard(args):
         # endpoint in `custom_providers` so switching the main model away from it
         # can't strand it — see normalize_config_shapes.
         normalize_config_shapes()
-        # Link project weights/ → <ARGUS_HOME>/weights so config.yaml's
-        # ARGUS_HOME-relative model paths resolve to the project's local weights.
-        sync_project_weights()
     except Exception:
         pass
 

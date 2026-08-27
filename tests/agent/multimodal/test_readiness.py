@@ -142,3 +142,62 @@ def test_report_shape_is_stable(monkeypatch):
     for c in r["capabilities"]:
         assert set(c.keys()) == {
             "key", "label", "status", "required", "reason", "fix"}
+
+
+# --------------------------------------------------------------------------- #
+# deep readiness — auxiliary.text is remote-only and must remain actionable
+# --------------------------------------------------------------------------- #
+def test_deep_aux_text_remote_endpoint_ok(monkeypatch):
+    _clear_mm_env(monkeypatch)
+    monkeypatch.setattr(R, "_module_installed", lambda name: name == "rapidocr")
+    calls = []
+
+    def reachable(url, timeout):
+        calls.append((url, timeout))
+        return True, ""
+
+    monkeypatch.setattr(R, "_tcp_reachable", reachable)
+    raw = {
+        "auxiliary": {
+            "text": {
+                "remote_backend": {"base_url": "https://text.example/v1"}
+            }
+        }
+    }
+    report = R.probe_mm_readiness({}, raw, deep=True)
+    cap = _cap(report, "aux_text_endpoint")
+    assert cap["status"] == R.OK
+    assert cap["required"] is True
+    assert cap["url"] == "https://text.example/v1"
+    assert calls == [("https://text.example/v1", R._TCP_DEFAULT_TIMEOUT)]
+
+
+def test_deep_aux_text_remote_endpoint_missing(monkeypatch):
+    _clear_mm_env(monkeypatch)
+    monkeypatch.setattr(R, "_module_installed", lambda name: name == "rapidocr")
+    monkeypatch.setattr(
+        R, "_tcp_reachable",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not probe empty URL")),
+    )
+    cap = _cap(R.probe_mm_readiness({}, {}, deep=True), "aux_text_endpoint")
+    assert cap["status"] == R.MISSING
+    assert cap["required"] is True
+    assert "auxiliary.text.remote_backend.base_url" in cap["reason"]
+    assert "auxiliary.text.remote_backend.base_url" in cap["fix"]
+
+
+def test_deep_aux_text_remote_endpoint_broken(monkeypatch):
+    _clear_mm_env(monkeypatch)
+    monkeypatch.setattr(R, "_module_installed", lambda name: name == "rapidocr")
+    monkeypatch.setattr(R, "_tcp_reachable", lambda *_args: (False, "connection refused"))
+    raw = {
+        "auxiliary": {
+            "text": {
+                "remote_backend": {"base_url": "http://127.0.0.1:9999/v1"}
+            }
+        }
+    }
+    cap = _cap(R.probe_mm_readiness({}, raw, deep=True), "aux_text_endpoint")
+    assert cap["status"] == R.BROKEN
+    assert cap["url"] == "http://127.0.0.1:9999/v1"
+    assert "connection refused" in cap["reason"]

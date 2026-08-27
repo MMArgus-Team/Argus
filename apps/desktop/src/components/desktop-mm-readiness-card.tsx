@@ -88,9 +88,8 @@ export function DesktopMmReadinessCard({
     let alive = true
     // probe_endpoints=true opts in to the deep readiness probes:
     //   * LLM endpoint TCP reachability (main / monitor / watcher / memory / …)
-    //   * auxiliary.text local weights + remote_backend endpoint
-    //   * auxiliary.ocr rapidocr package + remote_backend endpoint
-    //   * Qwen2.5-0.5B background preload (fire-and-forget)
+    //   * auxiliary.text.remote_backend endpoint
+    //   * local auxiliary.ocr rapidocr package
     // so the card warns "your endpoint is unreachable — requests will hang"
     // instead of the user hitting the mysterious "agent initialization timed
     // out" wall on the first prompt.

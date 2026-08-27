@@ -9,9 +9,9 @@ from agent.multimodal.voice_agent_context import (
     _DECIDE_ROUTE_SYSTEM,
     _DECIDE_SPEAK_SYSTEM,
     _INTENT_ADDRESSED_SYSTEM,
+    _INTENT_EOU_SYSTEM,
     _PHRASE_UTTERANCE_SYSTEM,
 )
-from agent.multimodal.voice_intent_local import _INTENT_EOU_SYSTEM
 from agent.multimodal.voice_rewrite import _JUDGE_SYSTEM, build_system_prompt
 from agent.prompt_builder import MM_LIVE_GUIDANCE
 from agent.prompt_i18n import LANGUAGE_POLICY
