@@ -1443,6 +1443,7 @@ class Turn:
     kind: str = "normal"
     rel_ts: Optional[float] = None   # 帧时间戳 (frame.ts)
     speaker: Optional[str] = None    # ★ v6: WhisperX diarize 的 speaker 标签
+    row_id: Optional[int] = None     # durable audio_observations.id (recall dedup/RRF)
 
 
 class ConversationLog:
@@ -1517,7 +1518,7 @@ class ConversationLog:
             self._trim_chars_locked()
         if kind == "audio_observation" and self.audio_store is not None:
             try:
-                self.audio_store.insert_audio_observation(turn)
+                turn.row_id = self.audio_store.insert_audio_observation(turn)
             except Exception as exc:
                 # Persistence must not interrupt live ASR delivery. The in-memory
                 # turn remains available and the failure is visible in logs.
@@ -2333,10 +2334,15 @@ class ScreenTextStore(_DesktopSQLiteMixin):
                     "(LOWER(raw_text) LIKE ? OR LOWER(window_title) LIKE ? OR LOWER(app) LIKE ?)")
                 args.extend([pat, pat, pat])
             where.append("(" + " OR ".join(or_parts) + ")")
+        # A real query must rank the complete matching corpus.  The previous
+        # `ORDER BY time DESC LIMIT <=250` candidate gate made an old exact OCR
+        # match unreachable whenever enough newer weak OR-term matches existed.
+        # Empty-query callers only want a recent time slice and keep the limit.
         sql = (f"SELECT * FROM screen_texts WHERE {' AND '.join(where)} "
-               "ORDER BY t_observed DESC LIMIT ?")
-        candidate_limit = max(raw_limit, min(250, raw_limit * 30))
-        args.append(candidate_limit)
+               "ORDER BY t_observed DESC")
+        if not query:
+            sql += " LIMIT ?"
+            args.append(raw_limit)
         with self._connect() as c:
             rows = c.execute(sql, args).fetchall()
         records = [self._row_to_record(r) for r in rows]
@@ -2640,10 +2646,13 @@ class ScreenTableStore(_DesktopSQLiteMixin):
                     "OR LOWER(raw_text) LIKE ?)")
                 args.extend([pat, pat, pat, pat, pat])
             where.append("(" + " OR ".join(or_parts) + ")")
-        candidate_limit = max(1, int(limit or 10)) * 8
+        # As with raw OCR, score all global matches before truncating.  Recent
+        # weak table hits must not hide an old exact table id/cell match.
         sql = (f"SELECT * FROM screen_tables WHERE {' AND '.join(where)} "
-               "ORDER BY t_observed DESC LIMIT ?")
-        args.append(candidate_limit)
+               "ORDER BY t_observed DESC")
+        if not query:
+            sql += " LIMIT ?"
+            args.append(max(1, int(limit or 10)))
         with self._connect() as c:
             rows = c.execute(sql, args).fetchall()
         records = [self._row_to_record(r) for r in rows]
@@ -3340,7 +3349,10 @@ class MemoryStore:
         # 兜底把 journal_mode=WAL 落到库上; 同时每条连接都补 synchronous=NORMAL
         # (per-connection 设置, 别处设过的不算)。
         self._wal_ready = False
+        self._audio_embedding_storage_removed = False
         self._init_db()
+        if self._audio_embedding_storage_removed:
+            self._vacuum_after_audio_embedding_removal()
         # in-memory 缓存最近的 micro 边界, 用于 finalize
         self._pending_micros: List[MicroEvent] = []   # 已 finalize 但未聚合到 macro 的 L1
         self._pending_macros: List[MacroEvent] = []   # 已 finalize 但未聚合到 super 的 L2
@@ -3434,8 +3446,114 @@ class MemoryStore:
                     "ALTER TABLE entities ADD COLUMN text_embedding BLOB",
                 ):
                     _try_alter(sql)
+                self._audio_embedding_storage_removed = (
+                    self._remove_audio_embedding_storage(conn))
+                self._audio_fts_enabled = self._ensure_audio_fts(conn)
                 self._repair_merged_entity_links(conn)
                 conn.commit()
+
+    @staticmethod
+    def _remove_audio_embedding_storage(conn: sqlite3.Connection) -> bool:
+        """Delete the retired per-ASR vectors from databases made by vNext.
+
+        New databases never create this column.  For an already-upgraded DB we
+        prefer ``DROP COLUMN``; older SQLite builds fall back to NULLing the
+        BLOBs.  The return value tells ``__init__`` whether a one-time VACUUM is
+        worthwhile to return the freed vector pages to the filesystem.
+        """
+        columns = {
+            str(row[1])
+            for row in conn.execute(
+                "PRAGMA table_info(audio_observations)").fetchall()
+        }
+        if "text_embedding" not in columns:
+            return False
+        had_vectors = conn.execute(
+            "SELECT 1 FROM audio_observations "
+            "WHERE text_embedding IS NOT NULL LIMIT 1").fetchone() is not None
+        try:
+            conn.execute(
+                "ALTER TABLE audio_observations DROP COLUMN text_embedding")
+        except sqlite3.OperationalError as exc:
+            if had_vectors:
+                conn.execute(
+                    "UPDATE audio_observations SET text_embedding=NULL "
+                    "WHERE text_embedding IS NOT NULL")
+            log.info(
+                "[mem] audio embedding column retained empty "
+                "(SQLite DROP COLUMN unavailable: %s)", exc)
+        return had_vectors
+
+    def _vacuum_after_audio_embedding_removal(self) -> None:
+        """One-time compaction after deleting legacy per-ASR vector BLOBs."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("VACUUM")
+            log.info("[mem] reclaimed SQLite pages after removing audio embeddings")
+        except Exception as exc:
+            # The pages remain reusable inside SQLite even if an active reader
+            # prevents shrinking the file at this moment.
+            log.warning("[mem] audio embedding cleanup VACUUM skipped: %s", exc)
+
+    @staticmethod
+    def _ensure_audio_fts(conn: sqlite3.Connection) -> bool:
+        """Create and backfill the global BM25 index for durable ASR text.
+
+        FTS5's trigram tokenizer is preferred because it indexes CJK and noisy
+        ASR substrings without an external segmenter.  Minimal SQLite builds may
+        lack trigram while still providing FTS5, so unicode61 is a safe fallback.
+        If FTS5 itself is unavailable, recall continues through keyword
+        matching instead of making the database unusable.
+        """
+        tokenizer = "trigram"
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS audio_observations_fts "
+                "USING fts5(text, content='audio_observations', "
+                "content_rowid='id', tokenize='trigram')")
+        except sqlite3.OperationalError:
+            tokenizer = "unicode61"
+            try:
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS audio_observations_fts "
+                    "USING fts5(text, content='audio_observations', "
+                    "content_rowid='id', tokenize='unicode61')")
+            except sqlite3.OperationalError as exc:
+                log.info("[mem] audio FTS5 unavailable; using non-FTS recall: %s", exc)
+                return False
+
+        conn.executescript("""
+            CREATE TRIGGER IF NOT EXISTS audio_observations_fts_ai
+            AFTER INSERT ON audio_observations BEGIN
+              INSERT INTO audio_observations_fts(rowid, text)
+              VALUES (new.id, new.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS audio_observations_fts_ad
+            AFTER DELETE ON audio_observations BEGIN
+              INSERT INTO audio_observations_fts(audio_observations_fts, rowid, text)
+              VALUES ('delete', old.id, old.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS audio_observations_fts_au
+            AFTER UPDATE OF text ON audio_observations BEGIN
+              INSERT INTO audio_observations_fts(audio_observations_fts, rowid, text)
+              VALUES ('delete', old.id, old.text);
+              INSERT INTO audio_observations_fts(rowid, text)
+              VALUES (new.id, new.text);
+            END;
+        """)
+        meta_key = f"audio_fts_{tokenizer}_v1"
+        indexed = conn.execute(
+            "SELECT value FROM meta WHERE key=?", (meta_key,)).fetchone()
+        if indexed is None:
+            # One-time migration for rows that predate the INSERT trigger.
+            conn.execute(
+                "INSERT INTO audio_observations_fts(audio_observations_fts) "
+                "VALUES ('rebuild')")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)",
+                (meta_key, "1"))
+        return True
 
     @staticmethod
     def _resolve_entity_row(
@@ -3615,6 +3733,17 @@ class MemoryStore:
             )
             return int(cur.lastrowid or 0)
 
+    @staticmethod
+    def _row_to_audio_turn(r: sqlite3.Row) -> Turn:
+        return Turn(
+            role="system", content=str(r["text"] or ""),
+            wall_ts=float(r["wall_ts"] or 0.0), kind="audio_observation",
+            rel_ts=(None if r["t_observed"] is None
+                    else float(r["t_observed"])),
+            speaker=(str(r["speaker"]) if r["speaker"] else None),
+            row_id=int(r["id"]),
+        )
+
     def get_audio_observations_after_id(
         self, after_id: int, ask_ts: float,
     ) -> Tuple[List[Turn], int]:
@@ -3644,6 +3773,7 @@ class MemoryStore:
                 wall_ts=float(r["wall_ts"] or 0.0),
                 kind="audio_observation", rel_ts=rel_ts,
                 speaker=(str(r["speaker"]) if r["speaker"] else None),
+                row_id=int(r["id"]),
             ))
             cursor = int(r["id"])
         return turns, cursor
@@ -3652,22 +3782,13 @@ class MemoryStore:
         """Return all durable ASR observations visible at the ask snapshot."""
         with self._connect() as c:
             rows = c.execute(
-                """SELECT t_observed, wall_ts, speaker, text
+                """SELECT id, t_observed, wall_ts, speaker, text
                    FROM audio_observations
                    WHERE t_observed IS NULL OR t_observed <= ?
                    ORDER BY COALESCE(t_observed, 0.0), id""",
                 (float(ask_ts) + 1e-3,),
             ).fetchall()
-        return [
-            Turn(
-                role="system", content=str(r["text"] or ""),
-                wall_ts=float(r["wall_ts"] or 0.0), kind="audio_observation",
-                rel_ts=(None if r["t_observed"] is None
-                        else float(r["t_observed"])),
-                speaker=(str(r["speaker"]) if r["speaker"] else None),
-            )
-            for r in rows
-        ]
+        return [self._row_to_audio_turn(r) for r in rows]
 
     def get_audio_observations_in_range(
         self, t_start: float, t_end: float, ask_ts: float,
@@ -3678,19 +3799,53 @@ class MemoryStore:
             return []
         with self._connect() as c:
             rows = c.execute(
-                """SELECT t_observed, wall_ts, speaker, text
+                """SELECT id, t_observed, wall_ts, speaker, text
                    FROM audio_observations
                    WHERE t_observed >= ? AND t_observed <= ?
                    ORDER BY t_observed, id""",
                 (float(t_start), safe_end),
             ).fetchall()
+        return [self._row_to_audio_turn(r) for r in rows]
+
+    def search_audio_fts(
+        self, query: str, ask_ts: float, *, top_k: int = 40,
+    ) -> List[Tuple[Turn, float]]:
+        """Global ASR FTS5/BM25 recall; lower raw BM25 is better.
+
+        Quoted query segments keep identifiers and CJK phrases intact.  Terms
+        shorter than three characters are left to the keyword arm because
+        the preferred trigram tokenizer cannot index them reliably.
+        """
+        if not getattr(self, "_audio_fts_enabled", False):
+            return []
+        parts = re.findall(
+            r"[\u4e00-\u9fff]+|[a-z0-9][a-z0-9._+-]*",
+            str(query or "").lower(),
+        )
+        searchable = [p for p in parts if len(p) >= 3][:16]
+        if not searchable:
+            return []
+        match = " OR ".join(
+            '"' + p.replace('"', '""') + '"' for p in searchable)
+        try:
+            with self._connect() as c:
+                rows = c.execute(
+                    """SELECT a.id,a.t_observed,a.wall_ts,a.speaker,a.text,
+                              bm25(audio_observations_fts) AS bm25_score
+                       FROM audio_observations_fts
+                       JOIN audio_observations AS a
+                         ON a.id=audio_observations_fts.rowid
+                       WHERE audio_observations_fts MATCH ?
+                         AND (a.t_observed IS NULL OR a.t_observed <= ?)
+                       ORDER BY bm25_score ASC, a.t_observed DESC
+                       LIMIT ?""",
+                    (match, float(ask_ts) + 1e-3, max(1, int(top_k))),
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            log.debug("[mem] audio FTS query failed for %r: %s", query, exc)
+            return []
         return [
-            Turn(
-                role="system", content=str(r["text"] or ""),
-                wall_ts=float(r["wall_ts"] or 0.0), kind="audio_observation",
-                rel_ts=float(r["t_observed"]),
-                speaker=(str(r["speaker"]) if r["speaker"] else None),
-            )
+            (self._row_to_audio_turn(r), float(r["bm25_score"] or 0.0))
             for r in rows
         ]
 
@@ -4107,111 +4262,93 @@ class MemoryStore:
 
     def vector_search_micro(
         self, query_vec: np.ndarray, ask_ts: float,
-        top_k: int = 30, pool_cap: int = 800,
+        top_k: int = 30, pool_cap: int = 0,
     ) -> List[Tuple["MicroEvent", float]]:
-        """Cosine-similarity search over micro_events.
+        """Exact cosine search over the complete visible micro vector corpus.
 
-        - Applies D3 anti-dirty-read (t_end <= ask_ts) + soft-delete filter,
-          same guards as the keyword path.
-        - Loads at most ``pool_cap`` most-recent rows with a non-null BLOB;
-          numpy brute-force is fine at the size range we deal with (a few
-          thousand micros per session, a 1024-dim matmul is sub-ms).
-        - Returns [] when embedding is off / column empty / decode fails so
-          MemoryToolBox can seamlessly fall back to pure keyword.
+        ``pool_cap`` is retained for call compatibility but intentionally
+        ignored.  The old implementation limited candidates to the 800 most
+        recent rows, which made old semantic matches unreachable.  Rows are
+        streamed in bounded batches and only the running top-K is retained, so
+        recall is complete without materializing every vector at once.
         """
         if query_vec is None or not self.embedding_client.enabled:
             return []
         try:
             with self._connect() as c:
-                rows = c.execute(
+                cur = c.execute(
                     """SELECT * FROM micro_events
                        WHERE t_end <= ? AND text_embedding IS NOT NULL
-                         AND (superseded_by IS NULL OR superseded_by='')
-                       ORDER BY t_end DESC LIMIT ?""",
-                    (ask_ts, pool_cap),
-                ).fetchall()
+                         AND (superseded_by IS NULL OR superseded_by='')""",
+                    (ask_ts,),
+                )
+                hits = self._stream_exact_vector_topk(
+                    cur, query_vec, top_k=top_k)
         except Exception as e:
             log.debug("[mem] vector_search_micro sql failed: %s", e)
             return []
-        if not rows:
-            return []
-        # Decode row-by-row so we can align kept_rows with the surviving matrix
-        # (some historical blobs may have mismatched dims after a config change).
-        vecs: List[np.ndarray] = []
-        kept: List[sqlite3.Row] = []
-        expected_dim: Optional[int] = None
-        for r in rows:
-            v = decode_vector(r["text_embedding"])
-            if v is None or v.size == 0:
-                continue
-            if expected_dim is None:
-                expected_dim = v.size
-            elif v.size != expected_dim:
-                continue
-            vecs.append(v)
-            kept.append(r)
-        if not vecs:
-            return []
-        matrix = np.stack(vecs, axis=0).astype(np.float32)
-        q = np.asarray(query_vec, dtype=np.float32)
-        qn = float(np.linalg.norm(q))
-        if qn > 1e-8:
-            q = q / qn
-        sims = matrix @ q                                   # (N,)
-        top_idx = np.argsort(-sims)[:max(1, top_k)]
         return [
-            (self._row_to_micro(kept[int(i)]), float(sims[int(i)]))
-            for i in top_idx
+            (self._row_to_micro(row), sim) for row, sim in hits
         ]
 
     def vector_search_entity(
         self, query_vec: np.ndarray, ask_ts: float,
-        top_k: int = 30, pool_cap: int = 800,
+        top_k: int = 30, pool_cap: int = 0,
     ) -> List[Tuple["Entity", float]]:
-        """Cosine-similarity search over entities. Same contract as
-        vector_search_micro but with merged_into soft-delete filter."""
+        """Complete exact entity-vector search (``pool_cap`` is ignored)."""
         if query_vec is None or not self.embedding_client.enabled:
             return []
         try:
             with self._connect() as c:
-                rows = c.execute(
+                cur = c.execute(
                     """SELECT * FROM entities
                        WHERE first_seen <= ? AND text_embedding IS NOT NULL
-                         AND (merged_into IS NULL OR merged_into='')
-                       ORDER BY last_seen DESC LIMIT ?""",
-                    (ask_ts, pool_cap),
-                ).fetchall()
+                         AND (merged_into IS NULL OR merged_into='')""",
+                    (ask_ts,),
+                )
+                hits = self._stream_exact_vector_topk(
+                    cur, query_vec, top_k=top_k)
         except Exception as e:
             log.debug("[mem] vector_search_entity sql failed: %s", e)
             return []
-        if not rows:
-            return []
-        vecs: List[np.ndarray] = []
-        kept: List[sqlite3.Row] = []
-        expected_dim: Optional[int] = None
-        for r in rows:
-            v = decode_vector(r["text_embedding"])
-            if v is None or v.size == 0:
-                continue
-            if expected_dim is None:
-                expected_dim = v.size
-            elif v.size != expected_dim:
-                continue
-            vecs.append(v)
-            kept.append(r)
-        if not vecs:
-            return []
-        matrix = np.stack(vecs, axis=0).astype(np.float32)
+        return [(self._row_to_entity(row), sim) for row, sim in hits]
+
+    @staticmethod
+    def _stream_exact_vector_topk(
+        cursor: sqlite3.Cursor, query_vec: np.ndarray, *, top_k: int,
+        embedding_col: str = "text_embedding", batch_size: int = 512,
+    ) -> List[Tuple[sqlite3.Row, float]]:
+        """Stream a complete SQLite vector corpus and retain exact top-K."""
         q = np.asarray(query_vec, dtype=np.float32)
         qn = float(np.linalg.norm(q))
         if qn > 1e-8:
             q = q / qn
-        sims = matrix @ q
-        top_idx = np.argsort(-sims)[:max(1, top_k)]
-        return [
-            (self._row_to_entity(kept[int(i)]), float(sims[int(i)]))
-            for i in top_idx
-        ]
+        keep_n = max(1, int(top_k))
+        candidates: List[Tuple[sqlite3.Row, float]] = []
+        while True:
+            rows = cursor.fetchmany(max(1, int(batch_size)))
+            if not rows:
+                break
+            vecs: List[np.ndarray] = []
+            kept: List[sqlite3.Row] = []
+            for row in rows:
+                vec = decode_vector(row[embedding_col])
+                # A model/dimension migration can leave old incompatible BLOBs.
+                if vec is None or vec.size != q.size:
+                    continue
+                vecs.append(vec)
+                kept.append(row)
+            if not vecs:
+                continue
+            sims = np.stack(vecs, axis=0).astype(np.float32) @ q
+            local_idx = np.argsort(-sims)[:keep_n]
+            candidates.extend(
+                (kept[int(i)], float(sims[int(i)])) for i in local_idx)
+            if len(candidates) > keep_n * 4:
+                candidates.sort(key=lambda item: item[1], reverse=True)
+                del candidates[keep_n:]
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        return candidates[:keep_n]
 
     # ==================================================================== #
     # ★ 二期 (frame image embedding): frame_embeddings 读写 + T→I 向量检索.
@@ -6128,6 +6265,10 @@ class MemoryStore:
             tables = sorted(
                 str(r[0]) for r in rows
                 if str(r[0]) not in self._RESET_KEEP_TABLES
+                # External-content FTS rows are removed by the DELETE trigger
+                # on audio_observations.  Deleting its shadow/config tables
+                # directly would corrupt the virtual table for the next session.
+                and not str(r[0]).startswith("audio_observations_fts")
             )
             for tbl in tables:
                 # 表名来自 sqlite_master, 不是外部输入, 拼接安全
