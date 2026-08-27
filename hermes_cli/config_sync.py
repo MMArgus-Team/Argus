@@ -97,10 +97,14 @@ def normalize_config_shapes() -> bool:
         if not added:
             return False
 
-        # strip_defaults=False: this is a repair write on a user's real config,
-        # not a fresh scaffold — don't let it prune keys that merely match a
-        # default.
-        save_config(cfg, strip_defaults=False)
+        # strip_defaults left at its default (True): load_config() returns the
+        # FULL deep-merge of DEFAULT_CONFIG + the user's yaml, so writing that
+        # back verbatim would balloon a hand-written config.yaml (tens of
+        # bytes) into a ~18KB dump of schema defaults. The strip pass keeps
+        # only the user's explicit paths (via _strip_default_values'
+        # preserve_keys) plus the newly added custom_providers row — the
+        # repair lands without clobbering the file's shape.
+        save_config(cfg)
         logger.info("[config-normalize] registered custom endpoint %r", added)
         return True
     except Exception as exc:  # pragma: no cover - best-effort

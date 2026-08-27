@@ -1621,3 +1621,44 @@ class TestBareCustomEndpointNormalization:
             before = config_path.stat().st_mtime_ns
             assert normalize_config_shapes() is False
             assert config_path.stat().st_mtime_ns == before
+
+    def test_normalize_config_shapes_does_not_bloat_minimal_config(
+        self, tmp_path
+    ):
+        """Regression: the startup repair must not dump the full DEFAULT_CONFIG
+        merge back onto a hand-written minimal config.yaml. It should keep only
+        the user's explicit keys + the added custom_providers row."""
+        from hermes_cli.config_sync import normalize_config_shapes
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "_config_version": DEFAULT_CONFIG["_config_version"],
+                    "model": {
+                        "provider": "custom",
+                        "default": "GPT-5.6 Luna",
+                        "base_url": "http://127.0.0.1:1234/v1",
+                    },
+                    "onboarding": {"seen": {"busy_input_prompt": True}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        before_size = config_path.stat().st_size
+
+        with patch.dict(os.environ, {"ARGUS_HOME": str(tmp_path)}):
+            assert normalize_config_shapes() is True
+
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # Only the user's explicit top-level keys + the repair row remain —
+        # NOT the ~75 top-level DEFAULT_CONFIG sections (that was the bug:
+        # strip_defaults=False ballooned a minimal config ~240x).
+        assert set(raw.keys()) == {
+            "_config_version", "model", "onboarding", "custom_providers",
+        }
+        assert raw["custom_providers"][0]["base_url"] == (
+            "http://127.0.0.1:1234/v1"
+        )
+        # Sanity bound: written file stays in the same order of magnitude.
+        assert config_path.stat().st_size < before_size * 30
