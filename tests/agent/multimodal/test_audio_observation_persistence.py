@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import time
 
 import numpy as np
@@ -76,6 +77,15 @@ def test_audio_observations_are_cleared_by_explicit_memory_reset(tmp_path):
     deleted = store.reset()
     assert deleted["audio_observations"] == 1
     assert store.get_audio_observations(ask_ts=10.0) == []
+    assert store.search_audio_fts("persistent", ask_ts=10.0) == []
+
+    # Reset must not corrupt FTS5 shadow/config tables; new-session rows remain
+    # indexable through the existing trigger.
+    store.insert_audio_observation(Turn(
+        role="system", content="fresh searchable transcript",
+        kind="audio_observation", rel_ts=1.0,
+    ))
+    assert store.search_audio_fts("searchable", ask_ts=10.0)
 
 
 def test_writer_audio_cursor_keeps_complete_same_timestamp_batch(tmp_path):
@@ -200,3 +210,173 @@ def test_unbounded_frame_vector_search_keeps_early_history(tmp_path):
         query, ask_ts=1000.0, top_k=1, pool_cap=600)[0]["frame_id"] != "f_0000000000"
     assert store.vector_search_frames(
         query, ask_ts=1000.0, top_k=1, pool_cap=0)[0]["frame_id"] == "f_0000000000"
+
+
+def test_search_audio_uses_fts_and_keyword_without_embeddings(tmp_path):
+    cfg = Config(mem_db_path=str(tmp_path / "audio-hybrid.sqlite"))
+    store = MemoryStore(cfg)
+
+    class _ForbiddenAudioEmbedding:
+        enabled = True
+
+        @staticmethod
+        def embed_text_sync(_text):
+            raise AssertionError("search_audio must not request an embedding")
+
+    store.embedding_client = _ForbiddenAudioEmbedding()
+    store.insert_audio_observation(Turn(
+        role="system", content="thermal protection system enabled",
+        kind="audio_observation", rel_ts=5.0))
+    store.insert_audio_observation(Turn(
+        role="system", content="系统支持自动泊车功能",
+        kind="audio_observation", rel_ts=15.0))
+    box = MemoryToolBox(store)
+    exact = box._search_audio("thermal protection", ask_ts=20.0, top_k=3)
+    assert any("thermal protection" in turn.content for turn in exact)
+
+
+def test_new_audio_schema_has_no_embedding_column(tmp_path):
+    store = MemoryStore(Config(mem_db_path=str(tmp_path / "audio-compact.sqlite")))
+    asyncio.run(ConversationLog(audio_store=store).append(
+        "system", "compact durable ASR", kind="audio_observation", rel_ts=1.0))
+    with store._connect() as conn:
+        columns = {row[1] for row in conn.execute(
+            "PRAGMA table_info(audio_observations)").fetchall()}
+    assert "text_embedding" not in columns
+
+
+def test_audio_fts_bm25_is_global_and_snapshot_safe(tmp_path):
+    store = MemoryStore(Config(mem_db_path=str(tmp_path / "audio-fts.sqlite")))
+    old_id = store.insert_audio_observation(Turn(
+        role="system", content="thermal protection target phrase",
+        kind="audio_observation", rel_ts=1.0,
+    ))
+    for idx in range(80):
+        store.insert_audio_observation(Turn(
+            role="system", content=f"thermal status update {idx}",
+            kind="audio_observation", rel_ts=10.0 + idx,
+        ))
+    future_id = store.insert_audio_observation(Turn(
+        role="system", content="thermal protection future phrase",
+        kind="audio_observation", rel_ts=500.0,
+    ))
+
+    hits = store.search_audio_fts(
+        "thermal protection", ask_ts=100.0, top_k=5)
+    ids = [turn.row_id for turn, _score in hits]
+    assert old_id in ids
+    assert future_id not in ids
+
+
+def test_existing_audio_database_is_migrated_and_fts_backfilled(tmp_path):
+    db_path = tmp_path / "legacy-audio.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            """CREATE TABLE audio_observations (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 t_observed REAL, wall_ts REAL NOT NULL, speaker TEXT,
+                 text TEXT NOT NULL, source TEXT DEFAULT 'asr',
+                 created_at REAL NOT NULL, text_embedding BLOB
+               )""")
+        conn.execute(
+            """CREATE VIRTUAL TABLE audio_observations_fts
+               USING fts5(text, content='audio_observations',
+                          content_rowid='id', tokenize='trigram')""")
+        conn.executescript("""
+            CREATE TRIGGER audio_observations_fts_ai
+            AFTER INSERT ON audio_observations BEGIN
+              INSERT INTO audio_observations_fts(rowid,text)
+              VALUES (new.id,new.text);
+            END;
+        """)
+        conn.execute(
+            """INSERT INTO audio_observations
+               (t_observed,wall_ts,speaker,text,source,created_at,text_embedding)
+               VALUES (?,?,?,?,?,?,?)""",
+            (2.0, time.time(), None, "legacy thermal protection", "asr",
+             time.time(), encode_vector(np.array([1.0, 0.0], dtype=np.float32))),
+        )
+
+    store = MemoryStore(Config(mem_db_path=str(db_path)))
+    with store._connect() as conn:
+        columns = {row[1] for row in conn.execute(
+            "PRAGMA table_info(audio_observations)").fetchall()}
+    assert "text_embedding" not in columns
+    hits = store.search_audio_fts("thermal protection", ask_ts=10.0)
+    assert hits and hits[0][0].content == "legacy thermal protection"
+
+
+def test_micro_and_entity_vectors_search_complete_history(tmp_path):
+    store = MemoryStore(Config(mem_db_path=str(tmp_path / "full-vectors.sqlite")))
+    store.embedding_client = type("EnabledEmbedding", (), {"enabled": True})()
+    target = encode_vector(np.array([1.0, 0.0], dtype=np.float32))
+    noise = encode_vector(np.array([0.0, 1.0], dtype=np.float32))
+    now = time.time()
+    with store._lock, store._connect() as conn:
+        conn.execute(
+            """INSERT INTO micro_events
+               (id,t_start,t_end,description,subject,object,action,macro_id,
+                facts_keys,frame_ids,created_at,text_embedding)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("micro_old_target", 0.0, 1.0, "old semantic target", "", "", "",
+             None, "[]", "[]", now, target),
+        )
+        conn.execute(
+            """INSERT INTO entities
+               (id,name,type,attributes,aliases,first_seen,last_seen,seen_count,
+                representative_frame_id,updated_at,text_embedding)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            ("entity_old_target", "old semantic target", "OBJECT", "{}", "[]",
+             0.0, 1.0, 1, "", now, target),
+        )
+        for idx in range(850):
+            ts = float(idx + 10)
+            conn.execute(
+                """INSERT INTO micro_events
+                   (id,t_start,t_end,description,subject,object,action,macro_id,
+                    facts_keys,frame_ids,created_at,text_embedding)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"micro_recent_{idx}", ts, ts + 0.5, "noise", "", "", "",
+                 None, "[]", "[]", now, noise),
+            )
+            conn.execute(
+                """INSERT INTO entities
+                   (id,name,type,attributes,aliases,first_seen,last_seen,seen_count,
+                    representative_frame_id,updated_at,text_embedding)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"entity_recent_{idx}", f"noise {idx}", "OBJECT", "{}", "[]",
+                 ts, ts + 0.5, 1, "", now, noise),
+            )
+
+    query = np.array([1.0, 0.0], dtype=np.float32)
+    micro = store.vector_search_micro(
+        query, ask_ts=2000.0, top_k=1, pool_cap=800)
+    entity = store.vector_search_entity(
+        query, ask_ts=2000.0, top_k=1, pool_cap=800)
+    assert micro[0][0].id == "micro_old_target"
+    assert entity[0][0].id == "entity_old_target"
+
+
+def test_screen_ocr_search_scores_all_global_matches(tmp_path):
+    store = ScreenTextStore(Config(mem_db_path=str(tmp_path / "ocr-global.sqlite")))
+    now = time.time()
+    with store._lock, store._connect() as conn:
+        conn.execute(
+            """INSERT INTO screen_texts
+               (frame_id,t_observed,app,window_title,ocr_blocks,raw_text,source,created_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            ("old_exact", 1.0, "browser", "", "[]",
+             "alpha targetidentifier", "rapidocr", now),
+        )
+        for idx in range(300):
+            conn.execute(
+                """INSERT INTO screen_texts
+                   (frame_id,t_observed,app,window_title,ocr_blocks,raw_text,source,created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (f"recent_{idx}", 10.0 + idx, "browser", "", "[]",
+                 f"alpha unrelated row {idx}", "rapidocr", now),
+            )
+
+    hits = store.search("alpha targetidentifier", ask_ts=1000.0, limit=1)
+    assert hits and hits[0].frame_id == "old_exact"

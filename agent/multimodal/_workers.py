@@ -26,7 +26,6 @@ from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from difflib import SequenceMatcher
 from io import BytesIO
 from types import SimpleNamespace
 from typing import (
@@ -9619,7 +9618,58 @@ class MemoryToolBox:
 
     def _search_audio(self, query: str, ask_ts: float,
                       top_k: int) -> List["Turn"]:
-        """Keyword search over audio_observation content.
+        """Hybrid ASR recall: keyword + FTS5/BM25.
+
+        Every arm searches the complete ``ask_ts`` snapshot.  Rank fusion is
+        deliberately based on row ids rather than timestamps/text because two
+        distinct ASR cues may legitimately contain identical words at the same
+        timestamp.  Audio rows intentionally do not store embeddings: semantic
+        coarse positioning is handled by event/frame recall, followed by a
+        timestamp lookup here, while direct audio lookup stays compact/local.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        pool_k = max(max(1, int(top_k)) * 4, 30)
+        keyword_rows = self._search_audio_keyword(q, ask_ts, pool_k)
+        fts_hits = self.mem.search_audio_fts(q, ask_ts, top_k=pool_k)
+
+        def _key(turn: Turn) -> str:
+            row_id = getattr(turn, "row_id", None)
+            if row_id is not None:
+                return f"db:{int(row_id)}"
+            return (f"legacy:{float(turn.rel_ts or 0.0):.6f}:"
+                    f"{float(turn.wall_ts or 0.0):.6f}:{turn.content}")
+
+        k = max(1, int(getattr(self.mem.cfg, "recall_rrf_k", 20)))
+        scores: Dict[str, float] = {}
+        keep: Dict[str, Turn] = {}
+
+        def _add_ranked(rows: Sequence[Turn], *, bonus: float = 0.0) -> None:
+            for rank, turn in enumerate(rows, start=1):
+                key = _key(turn)
+                scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank) + bonus
+                if key not in keep:
+                    keep[key] = turn
+                else:
+                    matched = getattr(turn, "_recall_matched_tokens", None)
+                    if matched:
+                        setattr(keep[key], "_recall_matched_tokens", matched)
+
+        _add_ranked(keyword_rows)
+        _add_ranked([turn for turn, _bm25 in fts_hits])
+        ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        rows = [keep[key] for key, _score in ordered[:max(1, int(top_k))]]
+        log.info(
+            "[mem_tool] search_audio hybrid %r -> %d rows "
+            "(keyword=%d fts=%d)",
+            q[:60], len(rows), len(keyword_rows), len(fts_hits),
+        )
+        return rows
+
+    def _search_audio_keyword(self, query: str, ask_ts: float,
+                              top_k: int) -> List["Turn"]:
+        """Token/substring arm retained for exact and short ASR terms.
 
         The recall LLM often sends broad Chinese queries such as
         "底盘 悬架 扭力梁".  A literal substring search makes those false-negative
