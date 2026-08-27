@@ -1846,6 +1846,36 @@ class HermesClientFactory(LLMClientFactory):
             return self._cached
         client: Any = None
         model: str = ""
+
+        # Honor the MAIN `model:` config first. The documented sub-role
+        # contract is "empty base_url → follow the main agent", and the main
+        # agent here is whatever config.yaml's model block says. Probing the
+        # auxiliary/vision stack first routes through the credential-pool
+        # aggregators instead, and on a plain custom-endpoint config (base_url
+        # + api_key, no auxiliary.vision block, no pool accounts) every worker
+        # call died with 503 "No available accounts" while the same key worked
+        # when the sub-roles were written out explicitly.
+        try:
+            main_cfg = _hermes_config().get("model") or {}
+            main_provider = str(main_cfg.get("provider") or "").strip().lower()
+            main_base_url = str(main_cfg.get("base_url") or "").strip()
+            main_api_key = str(main_cfg.get("api_key") or "").strip()
+            main_model = str(main_cfg.get("default") or main_cfg.get("model") or "").strip()
+            if main_base_url and main_api_key and main_provider in ("", "custom", "openai"):
+                from openai import AsyncOpenAI
+                main_client: Any = AsyncOpenAI(base_url=main_base_url, api_key=main_api_key)
+                dialect = _detect_thinking_provider(main_provider, main_base_url, main_model)
+                main_client = wrap_kimi_client(main_client, dialect=dialect)
+                client, model = main_client, main_model
+                log.info("[multimodal] main-model client resolved: endpoint=%s model=%s",
+                         main_base_url, main_model)
+        except Exception as e:
+            log.warning("[multimodal] main-model client resolution failed: %s", e)
+
+        if client is not None:
+            self._cached = (client, model)
+            return self._cached
+
         try:
             from agent.auxiliary_client import resolve_vision_provider_client
             # provider=None (not "auto") so a configured auxiliary.vision.base_url
