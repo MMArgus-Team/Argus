@@ -11655,16 +11655,8 @@ def cmd_dashboard(args):
     # spawned gateway (which inherits ARGUS_HOME) read the latest project
     # config. One-way, project wins; no-op when the project has no config.yaml.
     try:
-        from hermes_cli.config_sync import (
-            normalize_config_shapes,
-            sync_project_config,
-        )
+        from hermes_cli.config_sync import sync_project_config
         sync_project_config()
-        # Collapse ambiguous config shapes right after the copy (the copy is what
-        # re-introduces them). Notably: register a bare `model.provider: custom`
-        # endpoint in `custom_providers` so switching the main model away from it
-        # can't strand it — see normalize_config_shapes.
-        normalize_config_shapes()
     except Exception:
         pass
 
@@ -12460,18 +12452,6 @@ def main():
     try:
         if "update" not in sys.argv[1:]:
             _recover_from_interrupted_install()
-    except Exception:
-        pass
-
-    # Collapse ambiguous on-disk config shapes once per launch, for EVERY
-    # surface (TUI, CLI, dashboard — the dashboard also calls this right after
-    # its project-config copy, which re-introduces them). Idempotent and
-    # write-free in steady state, so this costs one cached config read. Placed
-    # after _apply_profile_override() (module import, above) so ARGUS_HOME —
-    # and therefore which profile's config we normalize — is already resolved.
-    try:
-        from hermes_cli.config_sync import normalize_config_shapes
-        normalize_config_shapes()
     except Exception:
         pass
 

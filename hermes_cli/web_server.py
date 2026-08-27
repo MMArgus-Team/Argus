@@ -4167,12 +4167,12 @@ def _apply_model_assignment_sync(
         if not provider or not model:
             raise HTTPException(status_code=400, detail="provider and model required for main")
         provider, model = _normalize_main_model_assignment(provider, model)
-        # NOTE: a bare ``model.provider: custom`` endpoint is guaranteed to have
-        # a durable ``custom_providers`` row by then — config_sync
-        # .normalize_config_shapes() registers it at startup — so clearing the
-        # stale ``model.base_url`` below cannot strand it. This path deliberately
-        # does NOT archive it itself; that belonged to every switch surface
-        # (TUI config.set, CLI) and only this one ever did it.
+        # NOTE: a bare ``model.provider: custom`` endpoint is re-constructible
+        # at runtime from ``model.base_url`` (model_switch._bare_custom_provider_def)
+        # while that URL is still set. Clearing the stale URL below when
+        # switching providers intentionally ends that endpoint's lifetime —
+        # users who want it back can re-enter the URL, or save it as a named
+        # ``custom_providers`` entry via the CLI/GUI custom-endpoint flow.
         model_cfg = _apply_main_model_assignment(
             cfg.get("model", {}), provider, model, base_url, api_key
         )
