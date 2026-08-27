@@ -2,7 +2,7 @@
   "name": "argus-desktop",
   "productName": "Argus",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Native desktop shell for Argus.",
   "author": "MMArgus Team",
   "type": "module",

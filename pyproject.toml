@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mm-argus"
-version = "0.1.1"
+version = "0.1.2"
 description = "A real-time multimodal AI agent for screen, video, audio, and conversational understanding"
 readme = "README.md"
 # Upper bound is load-bearing, not cosmetic. uv resolves the project's
