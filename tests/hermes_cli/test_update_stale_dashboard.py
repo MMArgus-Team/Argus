@@ -227,6 +227,41 @@ class TestFindStaleDashboardPids:
             pids = _find_stale_dashboard_pids(exclude_pids={12345})
         assert pids == []
 
+    def test_windows_uv_shim_chain_matched(self):
+        """uv console-shim form (<venv>\\Scripts\\argus.exe dashboard …) and its
+        python-wrapper siblings must be detected on Windows — the plain
+        "argus dashboard" pattern can't match "argus.exe dashboard", so
+        mm-dsh-managed dashboards used to survive `--stop`."""
+        wmic_out = "\n".join([
+            'CommandLine=C:\\Users\\x\\Argus\\.venv\\Scripts\\argus.exe dashboard --port 9119',
+            'ProcessId=11111',
+            'CommandLine="C:\\Users\\x\\Argus\\.venv\\Scripts\\python.exe" "C:\\Users\\x\\Argus\\.venv\\Scripts\\argus.exe" dashboard --port 9119',
+            'ProcessId=22222',
+            'CommandLine="C:\\Users\\x\\AppData\\Roaming\\uv\\python\\cpython-3.11\\python.exe" "C:\\Users\\x\\Argus\\.venv\\Scripts\\argus.exe" dashboard --port 9119',
+            'ProcessId=33333',
+            'CommandLine=C:\\Windows\\System32\\Widgets.exe -ServerName:Microsoft.Windows.Dashboard',
+            'ProcessId=44444',
+        ]) + "\n"
+        with patch("subprocess.run") as mock_run, \
+             patch("hermes_cli.main.sys.platform", "win32"):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout=wmic_out, stderr="")
+            pids = _find_stale_dashboard_pids()
+        assert sorted(pids) == [11111, 22222, 33333]
+
+    def test_windows_plain_argus_dashboard_still_matched(self):
+        """The legacy non-shim form still works through the wmic path."""
+        wmic_out = "\n".join([
+            'CommandLine=C:\\Tools\\argus dashboard --port 9120 --no-open',
+            'ProcessId=55555',
+        ]) + "\n"
+        with patch("subprocess.run") as mock_run, \
+             patch("hermes_cli.main.sys.platform", "win32"):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout=wmic_out, stderr="")
+            pids = _find_stale_dashboard_pids()
+        assert pids == [55555]
+
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX kill semantics")
 class TestKillStaleDashboardPosix:

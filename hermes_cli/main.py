@@ -5938,6 +5938,14 @@ def _find_stale_dashboard_pids(
     """
     patterns = [
         "argus dashboard",
+        # uv console-shim form: <venv>\Scripts\argus.exe dashboard … — the plain
+        # "argus dashboard" pattern can't match "argus.exe dashboard" (the .exe
+        # sits between the words), so mm-dsh-managed dashboards were invisible
+        # to `argus dashboard --stop` and survived the kill.
+        "argus.exe dashboard",
+        # Same shim, quoted inside a python wrapper cmdline:
+        #   "…\python.exe" "…\Scripts\argus.exe" dashboard …
+        'argus.exe" dashboard',
         "hermes_cli.main dashboard",
         "hermes_cli/main.py dashboard",
     ]
