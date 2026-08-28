@@ -118,11 +118,13 @@ def test_capture_perms_unknown(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_ready_true_when_required_ok_despite_optional_missing(monkeypatch):
     _clear_mm_env(monkeypatch)
-    # rapidocr present → memory (the only required cap) ok; everything else
-    # (voice/search/weights/torch) missing but optional.
+    # rapidocr present → memory + local OCR ok; main endpoint reachable →
+    # llm_endpoints ok; voice/search missing but optional.
     monkeypatch.setattr(R, "_module_installed",
                         lambda name: name == "rapidocr")
-    r = R.probe_mm_readiness({})
+    monkeypatch.setattr(R, "_tcp_reachable", lambda *_args: (True, ""))
+    raw = {"model": {"base_url": "https://llm.example/v1"}}
+    r = R.probe_mm_readiness({}, raw)
     assert r["ready"] is True
 
 
@@ -138,66 +140,42 @@ def test_report_shape_is_stable(monkeypatch):
     r = R.probe_mm_readiness({})
     assert set(r.keys()) == {"ready", "capabilities"}
     keys = {c["key"] for c in r["capabilities"]}
-    assert keys == {"voice", "deep_research", "memory", "capture_perms"}
+    assert keys == {
+        "voice", "deep_research", "memory", "capture_perms",
+        "aux_ocr_local", "llm_endpoints",
+    }
     for c in r["capabilities"]:
-        assert set(c.keys()) == {
-            "key", "label", "status", "required", "reason", "fix"}
+        # extras (url / endpoints / tcp_error) are allowed on top of the base
+        # six — assert the base shape as a subset.
+        assert {"key", "label", "status", "required", "reason", "fix"} <= set(c.keys())
 
 
 # --------------------------------------------------------------------------- #
-# deep readiness — auxiliary.text is remote-only and must remain actionable
+# unified probe set — every consumer (CLI doctor / RPC / startup advisory)
+# runs the SAME checks; only the wait-time knob and transport/output differ.
 # --------------------------------------------------------------------------- #
-def test_deep_aux_text_remote_endpoint_ok(monkeypatch):
+def test_aux_ocr_and_llm_endpoints_run_in_the_common_probe_set(monkeypatch):
+    _clear_mm_env(monkeypatch)
+    monkeypatch.setattr(R, "_module_installed", lambda name: name == "rapidocr")
+    probes = []
+    monkeypatch.setattr(R, "_tcp_reachable",
+                        lambda *args: (probes.append(args) or (True, "")))
+    raw = {"model": {"base_url": "https://main.example/v1"}}
+    report = R.probe_mm_readiness({}, raw)
+    # aux_ocr_local + llm_endpoints are part of the ONE probe set — no deep flag.
+    assert _cap(report, "aux_ocr_local")["status"] == R.OK
+    llm = _cap(report, "llm_endpoints")
+    assert llm["status"] == R.OK
+    assert llm["endpoints"][0]["url"] == "https://main.example/v1"
+    assert probes == [("https://main.example/v1", R._TCP_DEFAULT_TIMEOUT)]
+
+
+def test_llm_endpoints_probe_honors_timeout(monkeypatch):
     _clear_mm_env(monkeypatch)
     monkeypatch.setattr(R, "_module_installed", lambda name: name == "rapidocr")
     calls = []
-
-    def reachable(url, timeout):
-        calls.append((url, timeout))
-        return True, ""
-
-    monkeypatch.setattr(R, "_tcp_reachable", reachable)
-    raw = {
-        "auxiliary": {
-            "text": {
-                "remote_backend": {"base_url": "https://text.example/v1"}
-            }
-        }
-    }
-    report = R.probe_mm_readiness({}, raw, deep=True)
-    cap = _cap(report, "aux_text_endpoint")
-    assert cap["status"] == R.OK
-    assert cap["required"] is True
-    assert cap["url"] == "https://text.example/v1"
-    assert calls == [("https://text.example/v1", R._TCP_DEFAULT_TIMEOUT)]
-
-
-def test_deep_aux_text_remote_endpoint_missing(monkeypatch):
-    _clear_mm_env(monkeypatch)
-    monkeypatch.setattr(R, "_module_installed", lambda name: name == "rapidocr")
-    monkeypatch.setattr(
-        R, "_tcp_reachable",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("must not probe empty URL")),
-    )
-    cap = _cap(R.probe_mm_readiness({}, {}, deep=True), "aux_text_endpoint")
-    assert cap["status"] == R.MISSING
-    assert cap["required"] is True
-    assert "auxiliary.text.remote_backend.base_url" in cap["reason"]
-    assert "auxiliary.text.remote_backend.base_url" in cap["fix"]
-
-
-def test_deep_aux_text_remote_endpoint_broken(monkeypatch):
-    _clear_mm_env(monkeypatch)
-    monkeypatch.setattr(R, "_module_installed", lambda name: name == "rapidocr")
-    monkeypatch.setattr(R, "_tcp_reachable", lambda *_args: (False, "connection refused"))
-    raw = {
-        "auxiliary": {
-            "text": {
-                "remote_backend": {"base_url": "http://127.0.0.1:9999/v1"}
-            }
-        }
-    }
-    cap = _cap(R.probe_mm_readiness({}, raw, deep=True), "aux_text_endpoint")
-    assert cap["status"] == R.BROKEN
-    assert cap["url"] == "http://127.0.0.1:9999/v1"
-    assert "connection refused" in cap["reason"]
+    monkeypatch.setattr(R, "_tcp_reachable",
+                        lambda url, timeout: (calls.append((url, timeout)) or (True, "")))
+    raw = {"model": {"base_url": "https://main.example/v1"}}
+    R.probe_mm_readiness({}, raw, timeout=0.25)
+    assert calls == [("https://main.example/v1", 0.25)]

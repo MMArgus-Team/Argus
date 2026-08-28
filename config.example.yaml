@@ -223,20 +223,15 @@ model:
     frames_between_ocr: 4          # 每保留 N 张新帧识别一次 (取最新帧)
 
 # ── Auxiliary clients ──
-# vision: vision_analyze 工具 + 浏览器截图分析。text: 文本改写 + 语音意图分诊。
+# vision: vision_analyze 工具 + 浏览器截图分析。
+# (v33+: auxiliary.text 语音意图/口播改写端点不再列入 readiness 强制检查——
+# 不配置时自动回退主 agent,属可选覆盖;示例不再列出。)
 auxiliary:
   vision:
     provider: "custom"
     model: "GPT-5.6 Luna"
     base_url: ""
     api_key: ""
-  text:
-    remote_backend:
-      provider: "custom"
-      model: "GPT-5.6 Luna"
-      base_url: ""
-      api_mode: "anthropic_messages"
-      api_key: ""
 
 # ═══════════════════════════════════════════════════════════════════════
 # SETTINGS — 跨模块行为旋钮 (子模块旋钮在 model.*; 语音在 audio:/interaction:)。

@@ -17989,17 +17989,15 @@ def _(rid, params: dict) -> dict:
     into the multimodal experience (or show a guided "not ready" page) instead
     of dropping the user into a chat where voice/memory/etc silently don't work.
 
-    Returns the ``probe_mm_readiness`` report. ``deep=true`` (default in the
-    gateway, opt-out via ``probe_endpoints=false``) additionally runs LLM
-    endpoint TCP probes (including auxiliary.text.remote_backend) and checks
-    the local OCR package — everything lives in readiness.py so there is one
-    mental model for MM startup state.
+    Runs the SAME probe set as the CLI ``argus mm doctor`` (one shared logic in
+    readiness.py); only the transport/output differs. Optional
+    ``probe_timeout`` (seconds) bounds each LLM-endpoint TCP probe.
 
     Shape:
       {"ready": bool, "capabilities": [{key,label,status,required,reason,fix, ...}]}
     """
     try:
-        from agent.multimodal.readiness import probe_mm_readiness
+        from agent.multimodal.readiness import _TCP_DEFAULT_TIMEOUT, probe_mm_readiness
         raw_cfg = None
         try:
             from hermes_cli.config import load_config
@@ -18011,8 +18009,11 @@ def _(rid, params: dict) -> dict:
             cfg = build_config()
         except Exception:
             cfg = None  # fall back to field defaults; probe still reports gaps
-        deep = is_truthy_value(params.get("probe_endpoints", True))
-        return _ok(rid, probe_mm_readiness(cfg, raw_cfg, deep=deep))
+        try:
+            timeout = float(params.get("probe_timeout", _TCP_DEFAULT_TIMEOUT))
+        except (TypeError, ValueError):
+            timeout = _TCP_DEFAULT_TIMEOUT
+        return _ok(rid, probe_mm_readiness(cfg, raw_cfg, timeout=timeout))
     except Exception as e:
         return _err(rid, 5016, str(e))
 

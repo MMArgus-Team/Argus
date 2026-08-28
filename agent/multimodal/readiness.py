@@ -10,14 +10,15 @@ in one place so the answer never diverges across surfaces:
   * ``argus setup multimodal``   — onboarding wizard.
   * the gateway ``mm.readiness`` RPC — web/desktop persistent banner.
 
-Two probe modes:
-  * ``deep=False`` — pure, cheap (config/import/filesystem checks only). Safe
-    for CLI use where TCP + preloads are undesirable.
-  * ``deep=True`` (default in the gateway) — the pure probes AND:
-      - Bounded TCP CONNECT reachability for every configured LLM endpoint
-        (main / monitor / watcher / memory / embedding / auxiliary.vision),
-      - the required ``auxiliary.text.remote_backend`` endpoint,
-      - the local OCR backend check.
+One probe set for every consumer (CLI ``mm doctor``, the gateway
+``mm.readiness`` RPC, and the dashboard startup advisory). Consumers differ
+only in transport/cost/output:
+  * ``timeout`` bounds each LLM-endpoint TCP CONNECT probe (the wait-time knob);
+  * the CLI prints a text report + exit code, the RPC returns JSON, and the
+    startup advisory prints only the missing REQUIRED items.
+Checks: voice / deep-research (optional), memory + local OCR (rapidocr) and
+every configured LLM endpoint (main / monitor / watcher / memory / embedding /
+auxiliary.vision) via bounded TCP CONNECT (required).
 
 The report shape is stable (it's a cross-surface contract):
 
@@ -176,36 +177,34 @@ def _probe_capture_perms() -> Dict[str, Any]:
 
 
 def probe_mm_readiness(cfg: Any = None, raw_cfg: Any = None,
-                       deep: bool = False) -> Dict[str, Any]:
-    """Build the full multimodal readiness report.
+                       timeout: float = _TCP_DEFAULT_TIMEOUT) -> Dict[str, Any]:
+    """Build the full multimodal readiness report — one probe set for every
+    consumer (CLI ``mm doctor``, gateway ``mm.readiness`` RPC, dashboard startup
+    advisory); they differ only in the wait-time knob, transport and output.
 
     ``cfg`` may be a Config dataclass, a plain dict of the same flat fields, or
     None (falls back to field defaults). ``raw_cfg`` is the ORIGINAL nested
     argus config dict (before flattening) — needed for values that live only in
-    the nested layout (e.g. ``auxiliary.text.*``, ``auxiliary.vision.base_url``).
-
-    ``deep=True`` runs the extended probes: bounded TCP endpoint reachability
-    and the local OCR backend check. ``deep=False`` (the default) is pure —
-    safe for CLI / unit-test contexts where we don't want network I/O or heavy
-    imports.
+    the nested layout (e.g. ``model.base_url``, ``auxiliary.vision.base_url``).
+    ``timeout`` bounds each TCP CONNECT endpoint probe (default 3s).
     """
     caps: List[Dict[str, Any]] = [
         _probe_voice(cfg),
         _probe_deep_research(cfg),
         _probe_memory(cfg),
         _probe_capture_perms(),
+        *_probe_aux_ocr(cfg, raw_cfg),
+        _probe_llm_endpoints(cfg, raw_cfg, timeout=timeout),
     ]
-    if deep:
-        caps.extend(_probe_deep_caps(cfg, raw_cfg))
     # ready = every REQUIRED capability is ok. Optional caps never block.
     ready = all(c["status"] == OK for c in caps if c["required"])
     return {"ready": ready, "capabilities": caps}
 
 
 # =============================================================================
-# Deep probes: network + local package checks (run only when deep=True). Everything below
-# is what used to live in preflight.py — now folded into the one readiness
-# module so there's a single mental model: "MM readiness = this file".
+# Endpoint / local-package probes (part of the ONE common probe set — no mode
+# split). What used to live in preflight.py is folded into this module so
+# there's a single mental model: "MM readiness = this file".
 # =============================================================================
 
 def _nested(raw_cfg: Any, *path: str) -> Any:
@@ -262,36 +261,6 @@ def _tcp_reachable(url: str, timeout: float) -> Tuple[bool, str]:
     return False, last_err or "no address reachable"
 
 
-# ── Deep capability builders ──────────────────────────────────────────────
-
-def _probe_aux_text_remote(raw_cfg: Any) -> Dict[str, Any]:
-    """The voice/text auxiliary path is remote-only and required.
-
-    Keep this as its own capability instead of silently skipping an empty URL:
-    a missing ``base_url`` must make deep readiness actionable.
-    """
-    base_url = _nested_str(
-        raw_cfg, "auxiliary", "text", "remote_backend", "base_url")
-    yaml_path = "auxiliary.text.remote_backend.base_url"
-    if not base_url:
-        return _cap(
-            "aux_text_endpoint", "文本/意图 远端端点", MISSING,
-            required=True,
-            reason=f"{yaml_path} 为空",
-            fix=f"在 config.yaml 配置 {yaml_path}")
-
-    ok, reason = _tcp_reachable(base_url, _TCP_DEFAULT_TIMEOUT)
-    if ok:
-        return _cap(
-            "aux_text_endpoint", "文本/意图 远端端点", OK,
-            required=True, url=base_url)
-    return _cap(
-        "aux_text_endpoint", "文本/意图 远端端点", BROKEN,
-        required=True,
-        reason=f"端点不可达: {reason}",
-        fix=f"检查 config.yaml 的 {yaml_path} 以及对应服务",
-        url=base_url, tcp_error=reason)
-
 def _probe_aux_ocr(cfg: Any, raw_cfg: Any) -> List[Dict[str, Any]]:
     """Local rapidocr availability. Remote/cloud VLM OCR was removed — there is
     no endpoint path anymore; rapidocr+onnxruntime are core dependencies."""
@@ -335,7 +304,8 @@ _ROLE_YAML_PATH: Dict[str, str] = {
 }
 
 
-def _probe_llm_endpoints(cfg: Any, raw_cfg: Any) -> Dict[str, Any]:
+def _probe_llm_endpoints(cfg: Any, raw_cfg: Any,
+                         timeout: float = _TCP_DEFAULT_TIMEOUT) -> Dict[str, Any]:
     entries: List[Dict[str, str]] = []
 
     def _get(key: str) -> str:
@@ -373,7 +343,7 @@ def _probe_llm_endpoints(cfg: Any, raw_cfg: Any) -> Dict[str, Any]:
     for e in entries:
         url = e["url"]
         if url not in seen:
-            seen[url] = _tcp_reachable(url, _TCP_DEFAULT_TIMEOUT)
+            seen[url] = _tcp_reachable(url, timeout)
         ok, reason = seen[url]
         details.append({"role": e["role"], "url": url, "ok": ok, "reason": reason})
 
@@ -399,25 +369,3 @@ def _probe_llm_endpoints(cfg: Any, raw_cfg: Any) -> Dict[str, Any]:
         reason=f"{len(bad)}/{len(details)} 端点不可达: {summary}",
         fix=f"检查 config.yaml 里以下 key 的 URL 是否正确、对应服务是否启动: {fix_paths}",
         endpoints=details)
-
-
-def _probe_deep_caps(cfg: Any, raw_cfg: Any) -> List[Dict[str, Any]]:
-    """Assemble the deep-mode capability list. Failures never raise —
-    a probe crash becomes an unknown capability rather than an RPC error."""
-    caps: List[Dict[str, Any]] = []
-    try:
-        caps.append(_probe_aux_text_remote(raw_cfg))
-    except Exception as exc:
-        log.warning("[readiness] auxiliary.text probe failed: %s", exc, exc_info=True)
-        caps.append(_cap(
-            "aux_text_endpoint", "文本/意图 远端端点", UNKNOWN,
-            required=True, reason=f"probe error: {exc}"))
-    try:
-        caps.extend(_probe_aux_ocr(cfg, raw_cfg))
-    except Exception as exc:
-        log.warning("[readiness] aux_ocr probe failed: %s", exc, exc_info=True)
-    try:
-        caps.append(_probe_llm_endpoints(cfg, raw_cfg))
-    except Exception as exc:
-        log.warning("[readiness] endpoints probe failed: %s", exc, exc_info=True)
-    return caps

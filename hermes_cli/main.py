@@ -11601,7 +11601,12 @@ def _warn_if_multimodal_not_ready() -> None:
             cfg = build_config()
         except Exception:
             cfg = None
-        report = probe_mm_readiness(cfg)
+        try:
+            from hermes_cli.config import load_config
+            raw_cfg = load_config() or None
+        except Exception:
+            raw_cfg = None
+        report = probe_mm_readiness(cfg, raw_cfg)
         if report.get("ready"):
             return
         missing_required = [
@@ -11624,6 +11629,52 @@ def _warn_if_multimodal_not_ready() -> None:
         print(cyan("  运行 `argus setup multimodal` 按引导补齐,"
                    "或 `argus mm doctor` 查看完整状态。"))
         print()
+    except Exception:
+        pass
+
+
+def _warn_if_main_model_unconfigured() -> None:
+    """Basic check: the main agent model must be configured (non-empty).
+
+    ``model.default`` / ``model.base_url`` in the active config are the single
+    source of truth for the main agent (auxiliary_client). A config.yaml that
+    parses but carries an empty model block starts a Dashboard that cannot hold
+    a conversation — warn loudly up front instead of failing only at the first
+    request. Non-blocking: users mid-onboarding may legitimately start the
+    dashboard to finish setup.
+    """
+    try:
+        import yaml
+        from hermes_constants import get_config_path
+        from hermes_cli.colors import Colors, color
+        warn = lambda s: color(s, Colors.YELLOW)  # noqa: E731
+        cyan = lambda s: color(s, Colors.CYAN)  # noqa: E731
+
+        path = get_config_path()
+        if not path.exists():
+            print(warn(f"⚠ 主模型未配置: {path} 不存在 — 对话功能将无法工作。"))
+            print(cyan("  修复: 把项目的 config.example.yaml 复制为 config.yaml 并填写 "
+                       "model.default / model.base_url,或直接编辑该文件。"))
+            return
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        m = data.get("model")
+        model_name = m.get("default") if isinstance(m, dict) else (m if isinstance(m, str) else "")
+        base_url = m.get("base_url") if isinstance(m, dict) else ""
+        missing = []
+        if not str(model_name or "").strip():
+            missing.append("model.default")
+        # base_url lives on the dict form only; a flat-string model resolves its
+        # endpoint elsewhere (provider/env), so don't false-positive on it.
+        if isinstance(m, dict) and not str(base_url or "").strip():
+            missing.append("model.base_url")
+        if not missing:
+            return
+        print(warn("⚠ 主模型配置不完整,对话功能将无法正常工作:"))
+        for key in missing:
+            print(warn(f"    ✗ {key} 为空 (in {path})"))
+        print(cyan(f"  修复: 在 {path} 中填写 {', '.join(missing)} "
+                   "(或复制 config.example.yaml 为项目 config.yaml)。"))
     except Exception:
         pass
 
@@ -11654,11 +11705,29 @@ def cmd_dashboard(args):
     # load_config / start_server / gateway spawn, so both this process and the
     # spawned gateway (which inherits ARGUS_HOME) read the latest project
     # config. One-way, project wins; no-op when the project has no config.yaml.
+    # Basic check: a missing project config is legal (users may manage only
+    # <ARGUS_HOME>/config.yaml), but it must not be silent — otherwise someone
+    # edits the project file expecting it to take effect and nothing happens.
     try:
         from hermes_cli.config_sync import sync_project_config
-        sync_project_config()
+        if not sync_project_config():
+            from hermes_constants import get_config_path
+            _project_cfg = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "config.yaml")
+            sys.stderr.write(
+                "[config-sync] WARNING: project config not found at "
+                f"{_project_cfg} — using {get_config_path()} as-is. "
+                "Copy config.example.yaml to config.yaml to make the project "
+                "file the single source of truth.\n")
     except Exception:
         pass
+
+    # ── Main-model configuration check (non-blocking) ───────────────────
+    # The main agent needs a non-empty model.default / model.base_url in the
+    # ACTIVE config (the post-sync ARGUS_HOME copy) — empty values start a
+    # dashboard that cannot hold a conversation.
+    _warn_if_main_model_unconfigured()
 
     # ── Multimodal readiness advisory (non-blocking) ──────────────────────
     # The dashboard IS the multimodal surface. If a REQUIRED multimodal
