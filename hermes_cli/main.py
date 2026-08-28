@@ -6195,7 +6195,9 @@ def _kill_stale_dashboard_processes(
         return
 
     print()
-    print(f"⟲ Stopping {len(pids)} dashboard process(es) ({reason})")
+    # Plain ASCII arrow: U+27F2 (⟲) is not representable in GBK/cp936 consoles
+    # and raised UnicodeEncodeError on `dashboard --stop` under piped stdout.
+    print(f"Stopping {len(pids)} dashboard process(es) ({reason})")
 
     killed: list[int] = []
     failed: list[tuple[int, str]] = []
