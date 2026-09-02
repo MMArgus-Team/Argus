@@ -25,7 +25,7 @@ def _install_minimal_build(backend) -> None:
     def _build() -> bool:
         backend.cfg = SimpleNamespace()
         backend.mem = _MemStub()
-        backend.recall_agent = SimpleNamespace(llm_channel_lock=None)
+        backend.recall_agent = SimpleNamespace(recall_limiter=None)
         return True
 
     backend._build = _build
@@ -41,8 +41,8 @@ def test_start_with_timeout_publishes_ready_only_after_runtime_init():
     assert backend.state == backend.STATE_READY
     assert backend.is_ready is True
     assert backend.healthy is True
-    assert backend._llm_channel_lock is not None
-    assert backend.recall_agent.llm_channel_lock is backend._llm_channel_lock
+    assert backend._recall_limiter is not None
+    assert backend.recall_agent.recall_limiter is backend._recall_limiter
 
     assert backend.stop(timeout=1.0) is True
     assert backend.state == backend.STATE_STOPPED

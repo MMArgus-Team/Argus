@@ -5189,6 +5189,12 @@ export default function MultimodalChatPage() {
         return prevList.map((b) => (b.requestId === rid && (!b.done || b.waiting)
           ? { ...b, done: true, waiting: null } : b));
       }
+      // ★ 无 type 的 bg 事件不属于这个面板: QueryWorker 现在也在 multimodal.bg 上
+      //   发一行"前台进度"(channel=query, 只有 phase/stage), 给的是"用户正在等的那
+      //   一步在做什么", 不是深度分析的段/轮结构。旧代码在类型分发之前就无条件把
+      //   itemId 塞进列表, 于是每个普通提问都会多出一张空白深研卡。没有 type 就没有
+      //   任何可渲染内容, 直接忽略。
+      if (!p.type) return prevList;
       const itemId = rid || `_:${ch}`;
       const prev = prevList;
       {

@@ -584,6 +584,7 @@ _NUMERIC_KEYS = (
     "recall_topk_micro", "recall_topk_entity", "recall_distill_max_tokens",
     "recall_decide_frames", "recall_verify_enabled", "recall_verify_max_frames",
     "recall_verify_retries", "recall_verify_retry_delay_sec",
+    "recall_verify_max_tokens", "recall_max_concurrency",
     "conv_max_chars", "conv_min_turns", "conv_max_bg_obs", "conv_max_audio_obs",
     "buffer_seconds", "buffer_capture_fps",
     "search_facts_max", "search_fact_ttl_sec",

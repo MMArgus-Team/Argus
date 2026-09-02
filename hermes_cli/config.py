@@ -2153,6 +2153,11 @@ DEFAULT_CONFIG = {
         "recall_decide_frames": 4,
         "recall_verify_enabled": True,
         "recall_verify_max_frames": 8,
+        "recall_verify_max_tokens": 1024,
+        # Concurrent recall LLM steps. MemoryWriter is not part of this:
+        # writer and recall run independently, neither waits. Values above 5 are
+        # honoured with a warning rather than clamped.
+        "recall_max_concurrency": 5,
         # Conversation history bounds
         "conv_max_chars": 100000,
         "conv_min_turns": 1,

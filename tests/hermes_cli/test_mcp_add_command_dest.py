@@ -17,8 +17,7 @@ The fix: declare the flag with ``dest="mcp_command"``.  The CLI flag name
 is unchanged; only the in-memory attribute moves.
 
 We replicate the relevant parser shape here rather than importing the
-real builder, mirroring ``test_argparse_flag_propagation.py`` and
-``test_subparser_routing_fallback.py``.
+real builder, mirroring ``test_argparse_flag_propagation.py``.
 """
 
 import argparse

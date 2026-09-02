@@ -339,7 +339,14 @@ def _llm_endpoint_identity(client: Any) -> str:
 
 def _clients_share_llm_channel(memory_client: Any, recall_client: Any,
                                cfg: Any) -> bool:
-    """Whether Writer and Recall should share the backend's fairness lock.
+    """Whether Writer and Recall resolve to the same physical LLM endpoint.
+
+    Diagnostic only. It used to decide whether to install a fairness lock shared
+    by the two roles; that lock is gone (it made a user-blocking recall wait out a
+    full writer batch at every step), and the two now run independently. What the
+    answer still tells an operator is whether raising ``recall_max_concurrency``
+    will contend with the writer's own calls at the endpoint, or land on separate
+    capacity.
 
     Client identity/endpoint inspection is authoritative.  Config fallback is
     needed for test doubles and providers whose adapters intentionally hide the
@@ -452,7 +459,7 @@ class MemoryBackend:
         #   writer 只要有段就一定能在 recall 一步 LLM (~10s) 结束后立刻拿到锁,
         #   把 writer 段跨度控制回 30s cap 内。真正建构在启动 backend 事件循环
         #   之后 (_run), 避免绑到主线程 loop 上。
-        self._llm_channel_lock: Optional[asyncio.Lock] = None
+        self._recall_limiter: Optional[Any] = None
         # ``None`` means an older/minimal build did not classify the endpoints;
         # _main keeps the conservative shared-channel behaviour in that case.
         # The real _build sets an exact bool after both clients are resolved.
@@ -1244,8 +1251,8 @@ class MemoryBackend:
             self._recall_shares_writer_channel = _clients_share_llm_channel(
                 self.memory_client, recall_client, cfg)
             log.info(
-                "[mm-memory] writer/recall LLM channel shared=%s; "
-                "dedicated verifier=%s model=%s",
+                "[mm-memory] writer/recall share one endpoint=%s (they are not "
+                "serialized against each other); dedicated verifier=%s model=%s",
                 self._recall_shares_writer_channel,
                 verify_client is not recall_client,
                 verify_model,
@@ -2073,14 +2080,23 @@ class MemoryBackend:
         #   喂帧节奏打架)。只让 loop 保活 & idle, 由 pump_one_wake / drain_and_finalize
         #   / recall 通过 run_coroutine_threadsafe 驱动。wake_once / 聚合 / 召回 全走
         #   跟在线一样的代码, 仅"触发时机"改由喂帧方控制。
-        # ★ FIX (A): 在 backend 事件循环内创建 LLM 通道锁, 并把它注入到 recall_agent,
-        #   让 recall 每次 LLM 调用前 acquire, 与 writer 抢锁; 保证 writer 有段就能
-        #   在下一次 recall 释放锁瞬间抢到, 段跨度控制回 30s cap。
-        # Only serialize when Writer and Recall resolve to the same endpoint.
-        # Dedicated endpoints are intentionally independent; putting them behind
-        # one local lock would add latency without protecting any shared limit.
-        shares_channel = self._recall_shares_writer_channel is not False
-        self._llm_channel_lock = asyncio.Lock() if shares_channel else None
+        # Recall gets its own concurrency ceiling, created on the backend loop
+        # and injected into recall_agent.
+        #
+        # This used to be an asyncio.Lock SHARED WITH THE WRITER, added so a busy
+        # recall could not starve the writer's 30s segment cap. The reverse
+        # direction was never bounded and is the one users feel: a writer wake is
+        # 25 images / ~28s while a recall step is 6-12s, so a FIFO mutex made a
+        # blocking recall pay a full writer batch at every step — 140s of one
+        # 217s answer. The two are now fully independent: the writer takes no gate
+        # at all (its segment cap is guarded by try_watchdog_seal(), not by
+        # winning a race), and the limiter only bounds recall's own fan-out.
+        from ._workers import RecallConcurrencyLimiter
+        self._recall_limiter = RecallConcurrencyLimiter(
+            concurrency=int(getattr(self.cfg, "recall_max_concurrency", 5) or 5))
+        log.info(
+            "[mm-memory] recall concurrency limit=%d (writer runs independently)",
+            self._recall_limiter.limit)
         self._reviewer_run_lock = asyncio.Lock()
         reviewer_concurrency = max(
             1, int(getattr(self.cfg, "reviewer_max_concurrency", 1) or 1))
@@ -2113,9 +2129,9 @@ class MemoryBackend:
             max(0, int(getattr(self.cfg, "reviewer_overload_retries", 0) or 0)))
         if getattr(self, "recall_agent", None) is not None:
             try:
-                self.recall_agent.llm_channel_lock = self._llm_channel_lock
+                self.recall_agent.recall_limiter = self._recall_limiter
             except Exception as e:
-                log.warning("[mm-memory] 注入 recall llm_channel_lock 失败: %s", e)
+                log.warning("[mm-memory] 注入 recall_limiter 失败: %s", e)
         # READY is deliberately published only after every store/client/agent
         # exists *and* loop-owned synchronization has been created. Watcher may
         # now safely snapshot the resource bundle or submit work through the
@@ -2253,20 +2269,14 @@ class MemoryBackend:
             except Exception as e:
                 log.warning("[mm-memory] watchdog seal 内部异常: %s", e)
 
-        # ★ FIX (A): writer 每次 wake 前抢通道锁; recall 每步 LLM 之前也 acquire
-        #   同一把锁 → writer 只需等 recall 当前一步 (~10s) 就能拿到通道, 段跨度
-        #   回落到 30s cap 内。锁在 wake_once 结束或异常时严格释放。
-        async def _acquire_channel():
-            lock = self._llm_channel_lock
-            if lock is None:
-                return None
-            await lock.acquire()
-            return lock
-
+        # The writer takes no LLM gate at all. It used to share a mutex with
+        # recall, which is what made a user-blocking recall wait out a full ~28s
+        # writer batch at every step. The writer loop is serial by construction
+        # (one wake at a time), so it needs no ceiling of its own, and recall's
+        # ceiling is recall's own business.
         while not self._stop.is_set():
             cycle_started = time.monotonic()
             wrote = False
-            channel = None
             try:
                 if self.frame_buffer.size == 0:
                     # ★ FIX: buffer 空也先 watchdog 一次 —— 用户对着黑屏 30s+,
@@ -2274,26 +2284,14 @@ class MemoryBackend:
                     #   段就会永远悬空。watchdog 只查本地状态, 不占 LLM 通道。
                     await _run_watchdog()
                 else:
-                    channel = await _acquire_channel()
-                    try:
-                        await self.memory_writer.wake_once(
-                            on_progress=lambda ev: self._emit_worker_progress(
-                                "MemoryWriter", ev))
-                    finally:
-                        if channel is not None:
-                            channel.release()
-                            channel = None
+                    await self.memory_writer.wake_once(
+                        on_progress=lambda ev: self._emit_worker_progress(
+                            "MemoryWriter", ev))
                     fails = 0
                     wrote = True
             except asyncio.CancelledError:
-                if channel is not None:
-                    try: channel.release()
-                    except Exception: pass
                 break
             except Exception as exc:
-                if channel is not None:
-                    try: channel.release()
-                    except Exception: pass
                 fails += 1
                 log.debug("[mm-memory] writer wake failed %d/%d: %s", fails, max_fail, exc)
                 if fails >= max_fail:

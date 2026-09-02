@@ -9,15 +9,19 @@ import pytest
 from tools.mm_memory_tool import (
     QUERY_MULTIMODAL_SCHEMA,
     query_multimodal,
-    recall_multimodal_memory,
 )
 from tools.registry import registry
 from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
 
 
 def test_query_multimodal_is_the_only_model_visible_entry():
-    """The legacy Python alias must not create a second model schema."""
-    assert callable(recall_multimodal_memory)
+    """The retired legacy name must not reappear as a second model schema."""
+    import tools.mm_memory_tool as mm_memory_tool
+
+    # The synchronous alias was removed, not merely unregistered: it had been
+    # unrunnable for some time (set + set, and an asyncio semaphore acquired
+    # synchronously), so it advertised a route that could not execute.
+    assert not hasattr(mm_memory_tool, "recall_multimodal_memory")
     assert QUERY_MULTIMODAL_SCHEMA["name"] == "query_multimodal"
     assert registry.get_entry("query_multimodal") is not None
     assert registry.get_entry("recall_multimodal_memory") is None
@@ -449,32 +453,3 @@ def test_query_handoff_block_is_checked_before_worker_submission(
     assert "control" not in data
 
 
-def test_legacy_python_alias_keeps_synchronous_recall_compatibility():
-    calls = []
-
-    class _Engine:
-        recall_worker = object()
-
-        def recall_memory(self, **kwargs):
-            calls.append(kwargs)
-            return {
-                "ok": True,
-                "found": True,
-                "findings": "legacy result",
-                "frame_ids": [],
-                "rounds": 1,
-                "elapsed_sec": 0.1,
-            }
-
-    with patch(
-        "tools.mm_memory_tool._resolve_mm_engine",
-        return_value=(_Engine(), None),
-    ):
-        data = json.loads(recall_multimodal_memory(
-            query="earlier object",
-            session_id="sid",
-        ))
-
-    assert data["found"] is True
-    assert data["findings"] == "legacy result"
-    assert calls[0]["brief"] == "earlier object"

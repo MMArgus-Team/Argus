@@ -18,8 +18,10 @@ main-agent hook therefore runs once, never once per segment.
 
 ``submit_query_async()`` runs the existing WatcherWorker ReAct planner once,
 letting RecallAgent and the stateless Search ToolBox fan out concurrently and
-reply directly to the original user-message slot. ``recall_memory()`` remains a
-synchronous compatibility entry for non-gateway callers and tests.
+reply directly to the original user-message slot. It is the only entry: the old
+synchronous ``recall_memory()`` compatibility path was removed — it had been
+unrunnable (it added two sets together, and awaited an asyncio semaphore
+synchronously), so it documented a route that did not exist.
 
 The engine shares MemoryStore / FrameBuffer / ConversationLog / SearchFactStore /
 FrameStore with :class:`MemoryBackend` — these are **injected**, not rebuilt,
@@ -70,6 +72,210 @@ _QUERY_OCR_DEBUG_TOTAL_MAX_CHARS = 5_500
 # session.updated handshake.  Kept as a constant so lifecycle tests can use a
 # short deterministic bound.
 _ASR_START_TIMEOUT_SEC = 12.0
+
+# Public foreground progress (``multimodal.bg``) is rate limited per repeated
+# label so a chatty inner worker cannot flood a client that is only rendering a
+# one-line status.  A changed label always emits immediately.
+_QUERY_BG_MIN_REPEAT_INTERVAL_SEC = 1.0
+_QUERY_BG_DETAIL_MAX_CHARS = 200
+
+
+# Stages whose ``round`` field counts the *router's* ReAct rounds rather than the
+# emitting worker's own inner rounds.  Both numbers used to be printed side by
+# side ("recall [r1_r0] r1 ...", where the two 1s mean unrelated things), which
+# is the single biggest reason the old progress line was unreadable.
+_QUERY_ROUTER_ROUND_STAGES = frozenset({
+    "bg_progress", "delegate_start", "router_react", "router_thinking",
+    "recall_skipped", "recall_done", "search_done", "tool_error",
+})
+
+
+def _query_count(count: int, singular: str, plural: str = "") -> str:
+    """``2, "clue"`` → ``"2 clues"``.  Irregular plurals pass ``plural``."""
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _query_subtask_parts(task_id: str) -> tuple[Optional[int], str]:
+    """``"r1_r0"`` → ``(2, "1")``: which router round dispatched this subtask,
+    and its 1-based ordinal among that round's concurrent subtasks.
+
+    Both numbers have to reach the label: two recalls dispatched in one round,
+    or the same slot re-dispatched in a later round, must not collapse into one
+    de-duplicated line.  They are printed as two separately *named* segments
+    ("round 2 · recall 1"), because the unreadable part of the old line was
+    never the digits — it was three unlabelled numbers in a row.  An id that
+    does not parse is passed through as the ordinal rather than dropped, and the
+    verbatim form always rides the payload's ``subtask`` field.
+    """
+    match = re.fullmatch(r"r(\d+)_[sr](\d+)", task_id)
+    if not match:
+        return None, task_id
+    return int(match.group(1)) + 1, str(int(match.group(2)) + 1)
+
+
+def _query_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+# Stages with nothing to add beyond a plain reading of their name.  The stages
+# that DO carry a count (how many results were read, how many lookups are still
+# needed) are phrased in the functions below, where the event is in scope.
+_RECALL_STAGE_TEXT = {
+    # The router asked for this recall; the worker itself has not started yet.
+    "bg_progress": "dispatched",
+    "start": "searching memory",
+    "channel_wait": "waiting for a free model slot",
+    "fast_table": "answered from the screen-text index",
+    "distill": "distilling what was found",
+    "tool_skipped": "skipped a repeated lookup",
+    "verify_retry": "re-checking the findings against the frames",
+    "verify_rescue": "recovering findings after a failed check",
+    "verify_failed": "visual check failed",
+    "crop_images": "zooming into the frames",
+    "recall_skipped": "skipped, a duplicate of one already running",
+    "tool_error": "a lookup failed",
+}
+_SEARCH_STAGE_TEXT = {
+    "bg_progress": "searching",
+    "crop_images": "zooming into the frames",
+    "tool_error": "the search failed",
+    "done": "finished",
+}
+
+
+def _recall_stage_text(stage: str, inner: dict) -> str:
+    """What a RecallWorker stage means, in words a waiting user can read."""
+    if stage.endswith("_decision"):
+        if inner.get("can_answer") is True:
+            return "enough evidence, wrapping up"
+        n_next = _query_int(inner.get("n_next_calls"))
+        if n_next:
+            return f"needs {_query_count(n_next, 'more lookup')}"
+        return "no leads left, wrapping up"
+    if stage == "tool_obs":
+        observations = inner.get("observations")
+        n_obs = len(observations) if isinstance(observations, list) else 0
+        return (f"read {_query_count(n_obs, 'tool result')}" if n_obs
+                else "read the tool results")
+    if stage == "verify":
+        n_kept, n_in = _query_int(inner.get("n_kept")), _query_int(inner.get("n_in"))
+        return (f"kept {n_kept} of {n_in} findings after the visual check" if n_in
+                else "checking the findings against the frames")
+    if stage in {"recall_done", "done"}:
+        verb = "returned" if stage == "recall_done" else "finished with"
+        if inner.get("found") is False:
+            return f"{verb} nothing useful"
+        n_clues = _query_int(inner.get("n_clues"))
+        return f"{verb} {_query_count(n_clues, 'clue')}" if n_clues else f"{verb} no clues"
+    return _RECALL_STAGE_TEXT.get(stage) or stage.replace("_", " ")
+
+
+def _search_stage_text(stage: str, inner: dict) -> str:
+    if stage == "search_done":
+        return ("returned nothing useful" if inner.get("found") is False
+                else "returned results")
+    return _SEARCH_STAGE_TEXT.get(stage) or stage.replace("_", " ")
+
+
+def _router_stage_text(stage: str, inner: dict) -> str:
+    if stage == "router_thinking":
+        return "thinking"
+    if stage == "router_react":
+        tool_calls = inner.get("tool_calls")
+        recall_tasks = inner.get("recall_tasks")
+        n_search = len(tool_calls) if isinstance(tool_calls, list) else 0
+        n_recall = len(recall_tasks) if isinstance(recall_tasks, list) else 0
+        dispatched = [
+            _query_count(n_search, "search", "searches") if n_search else "",
+            _query_count(n_recall, "recall") if n_recall else "",
+        ]
+        dispatched = [part for part in dispatched if part]
+        return (f"dispatched {' and '.join(dispatched)}" if dispatched
+                else "answering from what it already has")
+    return stage.replace("_", " ")
+
+
+def _query_stage_text(stage: str, payload: dict) -> str:
+    if stage == "started":
+        return "accepted, answering in the background"
+    if stage == "delegate_start":
+        return "analysing the question"
+    if stage == "ocr_evidence":
+        n_records = _query_int(payload.get("record_count"))
+        return (f"ocr evidence collected ({_query_count(n_records, 'record')})"
+                if n_records else "no ocr evidence on screen")
+    return stage.replace("_", " ")
+
+
+def query_progress_label(worker: str, phase: str, payload: dict) -> str:
+    """One short human label for a foreground query's public progress line.
+
+    QueryWorker's rich trajectory is a debug surface: per-worker payload shapes
+    plus base64 frame previews.  A client that is merely *blocked* on the answer
+    sees only this line — often in a rolling few-line window — so it is written
+    as prose for a person, not as an event name for a parser:
+
+    * Internal stage names become phrases.  ``tool_obs`` said nothing to the
+      person waiting; "read 2 tool results" does, and the counts come from the
+      same event the raw name came from.
+    * Every number is named, and they are ordered outermost-first, so the line
+      spells out the nesting instead of encoding it: the router runs *rounds*,
+      each round dispatches numbered concurrent subtasks, and a recall/search
+      subtask then loops its own *steps*.  ``round 2 · recall 1 · step 2`` is
+      the same three numbers the old ``[r1_r0] r1`` had, in the same order —
+      only now nothing has to be looked up to read them.
+    * Ids leave the sentence; the verbatim dispatch id rides the payload's
+      ``subtask`` field for correlation with logs and the debug trajectory.
+
+    Displayed rounds and steps are 1-based; ``stage``, ``round`` and ``subtask``
+    on the same payload keep the raw 0-based values machines should branch on.
+
+    Returns "" for events that carry no useful progress meaning (terminal
+    statuses ride ``message.complete``; pure debug payloads stay debug-only).
+    """
+    inner = payload.get("event")
+    inner = inner if isinstance(inner, dict) else {}
+    step = str(inner.get("phase") or "").strip() if phase == "bg_progress" else ""
+    stage = step or str(phase or "").strip()
+    if not stage or stage in {"complete", "error", "cancelled", "answer_ready"}:
+        return ""
+    round_value = inner.get("round", payload.get("round"))
+    try:
+        round_number: Optional[int] = int(round_value) + 1
+    except (TypeError, ValueError):
+        round_number = None
+    router_round, ordinal = _query_subtask_parts(
+        str(inner.get("task_id") or "").strip())
+    if stage in _QUERY_ROUTER_ROUND_STAGES:
+        # Emitted by the router loop itself, so ``round`` counts router rounds —
+        # the same number the dispatch id already carries.  No inner step yet.
+        if router_round is None:
+            router_round = round_number
+        inner_step: Optional[int] = None
+    else:
+        # Emitted from inside a subtask, so ``round`` counts that subtask's own
+        # loop; its router round is known only from the dispatch id.
+        inner_step = round_number
+    channel = {"RecallWorker": "recall", "SearchWorker": "search",
+               "QueryRouter": "router"}.get(worker, "query")
+    if worker == "RecallWorker":
+        text = _recall_stage_text(stage, inner)
+    elif worker == "SearchWorker":
+        text = _search_stage_text(stage, inner)
+    elif worker == "QueryRouter":
+        text = _router_stage_text(stage, inner)
+    else:
+        text = _query_stage_text(stage, payload)
+    segments = [
+        f"round {router_round}" if router_round else "",
+        f"{channel} {ordinal}".rstrip(),
+        f"step {inner_step}" if inner_step else "",
+        text,
+    ]
+    return " · ".join(segment for segment in segments if segment)
 
 
 def sanitize_query_ocr_debug_evidence(evidence: Any) -> list[dict]:
@@ -1893,14 +2099,67 @@ class WatcherAgent:
 
         emit = self._emit_cb
 
+        # Public progress for the blocked answer slot.
+        #
+        # ``multimodal.trajectory`` is the Debug inspector's surface: it carries
+        # base64 frame previews, bespoke per-worker payload shapes, and it
+        # correlates by ``parent_user_message_id``.  A gateway client that is
+        # simply waiting on this query has neither the appetite for that payload
+        # nor that correlation key — it holds a ``request_id``.  Without a public
+        # line, everything between ``tool.complete`` and ``message.complete`` is
+        # silent, which on a busy memory writer is minutes: a slow answer then
+        # looks exactly like a hung one, and the wait gets misattributed to
+        # whichever client is doing the waiting.  ``multimodal.bg`` is the
+        # progress surface every other engine already publishes on, so no client
+        # has to learn a new event to see this.
+        _bg_state = {"label": "", "at": 0.0}
+
+        def _emit_query_bg(label: str, *, stage: str = "", **fields) -> None:
+            if emit is None or not label:
+                return
+            now = time.monotonic()
+            if (label == _bg_state["label"]
+                    and now - float(_bg_state["at"]) <
+                    _QUERY_BG_MIN_REPEAT_INTERVAL_SEC):
+                return
+            _bg_state["label"] = label
+            _bg_state["at"] = now
+            payload: Dict[str, Any] = {
+                "request_id": parent_id,
+                "task_id": qid,
+                "channel": "query",
+                "phase": label,
+            }
+            if stage:
+                payload["stage"] = stage
+            for key, value in fields.items():
+                if value is None or value == "":
+                    continue
+                # Scalars pass through; everything else is stringified and
+                # bounded. This event must stay small enough to be safe at any
+                # emission rate — no frames, no observations, no answers.
+                payload[key] = (
+                    value if isinstance(value, (int, float, bool))
+                    else str(value)[:_QUERY_BG_DETAIL_MAX_CHARS]
+                )
+            try:
+                emit("multimodal.bg", payload)
+            except Exception:
+                pass
+
         def _emit_trajectory(phase: str, **payload) -> None:
             if emit is None:
                 return
+            worker = str(payload.pop("worker", "QueryWorker"))
             try:
                 emit("multimodal.trajectory", {
-                    "worker": str(payload.pop("worker", "QueryWorker")),
+                    "worker": worker,
                     "phase": phase,
                     "task_id": qid,
+                    # request_id duplicates parent_user_message_id under the name
+                    # every other public event uses, so the debug surface and the
+                    # public one can be correlated without a lookup table.
+                    "request_id": parent_id,
                     "parent_user_message_id": parent_id,
                     "query": user_query,
                     **({"worker_instruction": query}
@@ -1909,6 +2168,20 @@ class WatcherAgent:
                 })
             except Exception:
                 pass
+            inner = payload.get("event")
+            inner = inner if isinstance(inner, dict) else {}
+            _emit_query_bg(
+                query_progress_label(worker, phase, payload),
+                stage=str(inner.get("phase") or phase or ""),
+                worker=worker,
+                # The label spells the subtask as a readable ordinal ("#2.1"),
+                # so the verbatim dispatch id ("r1_r0") rides its own field —
+                # that is what matches the logs and the debug trajectory.
+                subtask=str(inner.get("task_id") or ""),
+                round=inner.get("round", payload.get("round")),
+                elapsed_sec=inner.get("elapsed_sec", payload.get("elapsed_sec")),
+                waited_ms=inner.get("waited_ms"),
+            )
 
         def _bounded_jpeg_b64(value: Any) -> str:
             """Return one complete bounded JPEG data payload, or ``""``.
@@ -2253,6 +2526,12 @@ class WatcherAgent:
                 raise RuntimeError("QueryWorker semaphore is not initialized")
             acquired = False
             try:
+                if semaphore.locked():
+                    # Queue time is indistinguishable from model time to the
+                    # caller, so say which one it is instead of staying silent.
+                    _emit_query_bg(
+                        "query worker queued (all slots busy)",
+                        stage="queued")
                 await semaphore.acquire()
                 acquired = True
                 with self._query_lock:
@@ -2541,143 +2820,6 @@ class WatcherAgent:
             log.warning(
                 "[query-evidence] collection failed: %s", exc, exc_info=True)
             return {"ok": False, "error": f"visual evidence collection failed: {exc}"}
-
-    # ------------------------------------------------------------------ #
-    def recall_memory(self, brief: str, user_text: str = "",
-                      timeout: Optional[float] = None) -> Dict[str, Any]:
-        """Run one bounded QueryWorker recall job.
-
-        At most ``query_worker_max_concurrency`` jobs execute concurrently and
-        only ``query_worker_max_pending`` additional callers may wait. This
-        protects the backend loop without changing the main-agent tool contract.
-        """
-        started = time.monotonic()
-        with self._query_lock:
-            admitted = self._query_running + self._query_pending
-            cap = self._query_max_concurrency + self._query_max_pending
-            if admitted >= cap:
-                log.warning(
-                    "[query-worker] queue full running=%d pending=%d cap=%d+%d",
-                    self._query_running, self._query_pending,
-                    self._query_max_concurrency, self._query_max_pending)
-                return {
-                    "ok": False,
-                    "error": "memory query queue is full",
-                    "queue_full": True,
-                }
-            self._query_pending += 1
-
-        wait_timeout = None if timeout is None else max(0.0, float(timeout))
-        acquired = self._query_semaphore.acquire(timeout=wait_timeout)
-        with self._query_lock:
-            self._query_pending = max(0, self._query_pending - 1)
-            if acquired:
-                self._query_running += 1
-        if not acquired:
-            return {
-                "ok": False,
-                "error": "memory query timed out while waiting for a worker",
-                "timed_out": True,
-            }
-
-        try:
-            remaining = timeout
-            if timeout is not None:
-                remaining = max(1.0, float(timeout) - (time.monotonic() - started))
-            return self._recall_memory_unbounded(
-                brief, user_text=user_text, timeout=remaining)
-        finally:
-            with self._query_lock:
-                self._query_running = max(0, self._query_running - 1)
-            self._query_semaphore.release()
-
-    def _recall_memory_unbounded(self, brief: str, user_text: str = "",
-                                 timeout: Optional[float] = None) -> Dict[str, Any]:
-        """BLOCKING: run the RecallAgent's full ReAct memory-recall loop and
-        return its distilled findings. This is the main agent's synchronous entry
-        into the mature RecallAgent (vs. set_live_watcher, which re-watches
-        the raw video in the background).
-
-        RecallAgent.run() is a multi-round LLM loop over the memory graph with
-        per-round distillation and optional frame verification. When a
-        MemoryBackend with its own recall_agent + loop is present, the call is
-        delegated to backend.recall() (unified entry, backend loop); otherwise
-        it marshals onto THIS engine's loop via run_coroutine_threadsafe. Either
-        way it blocks (with optional timeout) so the main agent can answer THIS
-        turn.
-
-        Returns a dict:
-          {ok, found, findings, clues, frame_ids, rounds, elapsed_sec}
-        ``ok=False`` + ``error`` on engine-not-ready / timeout / crash so the tool
-        can report cleanly (``timed_out=True`` on timeout). Never raises.
-        """
-        brief = (brief or "").strip()
-        # ★ 重构: 记忆召回子 agent (RecallAgent) 归 MemoryBackend 管理并有独立模型。
-        #   有 backend 就走 backend 统一入口(marshal 到 backend loop); 否则用本引擎的
-        #   本地兜底 recall_agent(engine 单跑场景)。主 Agent 工具与 WatcherWorker 同源。
-        mb = self._memory_backend
-        if mb is not None and getattr(mb, "recall_agent", None) is not None \
-                and getattr(mb, "_loop", None) is not None:
-            return mb.recall(brief, user_text=user_text, timeout=timeout)
-        if self._loop is None or self.recall_agent is None:
-            return {"ok": False, "error": "engine not ready (recall unavailable)"}
-        if not brief:
-            return {"ok": False, "error": "brief is required"}
-
-        # Anchor reads at the current stream time (RecallWorker enforces the D3
-        # anti-dirty-read guard against this ask_ts). None → 0.0 lets the worker
-        # fall back internally.
-        try:
-            # FrameBuffer.latest_ts is a @property, not a method.
-            ask_ts = self.frame_buffer.latest_ts if self.frame_buffer else None
-        except Exception:
-            ask_ts = None
-        ask_ts = float(ask_ts) if ask_ts is not None else 0.0
-
-        try:
-            fut = asyncio.run_coroutine_threadsafe(
-                self.recall_agent.run(
-                    initial_calls=[], brief=brief,
-                    user_text=(user_text or brief), ask_ts=ask_ts),
-                self._loop)
-        except Exception as exc:
-            log.warning("[watcher] recall_memory submit failed: %s", exc)
-            return {"ok": False, "error": f"submit failed: {exc}"}
-
-        # timeout=None → 不设等待墙 (调用方未显式给)。等待墙是编排层的选择,
-        # 引擎不预设魔法默认。单次 LLM 调用超时统一走主 Agent 的
-        # providers.<id>.request_timeout_seconds (见 hermes_glue._submodule_http_client)。
-        _wall = None if timeout is None else max(1.0, float(timeout))
-        try:
-            res = fut.result(timeout=_wall)
-        except FuturesTimeout:
-            # Don't leave the coroutine running unbounded on the engine loop.
-            try:
-                fut.cancel()
-            except Exception:
-                pass
-            log.warning("[watcher] recall_memory timed out after %.1fs", _wall)
-            return {"ok": False, "error": f"recall timed out after {_wall:.0f}s",
-                    "timed_out": True}
-        except Exception as exc:
-            log.warning("[watcher] recall_memory crashed: %s", exc)
-            return {"ok": False, "error": f"recall failed: {exc}"}
-
-        findings = (getattr(res, "findings", "") or "").strip()
-        clues = list(getattr(res, "clues", None) or [])
-        frame_ids = list(getattr(res, "frame_ids", None) or [])
-        # RecallWorker returns a sentinel string when nothing was found.
-        from agent.multimodal._sentinels import RECALL_NO_CLUES
-        found = bool(findings) and findings != RECALL_NO_CLUES
-        return {
-            "ok": True,
-            "found": found,
-            "findings": findings,
-            "clues": clues,
-            "frame_ids": frame_ids,
-            "rounds": int(getattr(res, "rounds", 0) or 0),
-            "elapsed_sec": round(float(getattr(res, "elapsed_sec", 0.0) or 0.0), 2),
-        }
 
     # ------------------------------------------------------------------ #
     async def _run_delegation(self, request_id: str,

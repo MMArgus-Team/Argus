@@ -9,9 +9,6 @@ only when the question needs earlier stream memory or outside facts. Historical
 stream content lives in the multimodal memory graph (micro/macro events,
 entities + their evolution, ASR subtitles), written continuously by the
 MemoryWriter/Reviewer.
-Synchronous non-gateway callers of the legacy Python
-``recall_multimodal_memory`` entry retain the historical RecallWorker
-compatibility path; the model-visible tool never takes that narrower route.
 
 Division of labour (also in the schema description):
 
@@ -40,12 +37,9 @@ from tools.live_watcher_tool import _resolve_mm_engine
 
 log = logging.getLogger("hermes.multimodal.query")
 
-# Upper bound on how long the tool blocks the main agent while the RecallWorker
-# runs its ReAct loop (recall_max_rounds LLM rounds + optional frame verify).
-# ★ 25s → 45s: 实测 decide/distill 每次 LLM 调用 6-9s (qwen3.7-plus 代理端点),
-#   2-3 轮就撞 25s 上限。backend 会保留 partial findings; 这里仍给
-#   2-3 轮完整 ReAct 留出余量。
-_RECALL_TIMEOUT_SEC = 45.0
+# Upper bound on how long evidence collection blocks the main agent.
+# ★ 25s → 45s: 实测每次 LLM 调用 6-9s (qwen3.7-plus 代理端点), 2-3 轮就撞 25s
+#   上限。backend 会保留 partial findings; 这里仍给 2-3 轮完整 ReAct 留出余量。
 _EVIDENCE_TIMEOUT_SEC = 45.0
 _RESPONSE_MODES = {"direct", "evidence"}
 
@@ -78,15 +72,14 @@ def _query_multimodal_impl(
     session_id=None,
     *,
     response_mode="direct",
-    allow_sync_recall=False,
     **_kw,
 ) -> str:
-    """Implement direct-answer handoff, visual evidence, and legacy recall.
+    """Implement direct-answer handoff and visual evidence collection.
 
-    See the schema description for when to use this vs set_live_watcher.
-    Interactive calls are non-blocking QueryWorker handoffs. Only the legacy
-    Python wrapper opts into synchronous RecallWorker compatibility. Never
-    raises — any error becomes a tool_error.
+    See the schema description for when to use this vs set_live_watcher. Calls
+    are non-blocking QueryWorker handoffs; without an interactive answer slot the
+    tool reports that rather than degrading to a narrower route. Never raises —
+    any error becomes a tool_error.
     """
     q = (query or "").strip()
     if not q:
@@ -276,142 +269,28 @@ def _query_multimodal_impl(
 
     # ``query_multimodal`` promises the unified QueryWorker route (ask-time
     # frames + optional Recall/Search) and therefore must not silently degrade
-    # to Recall-only when there is no interactive answer slot. The separately
-    # named legacy Python wrapper is the sole opt-in to synchronous recall.
-    if not allow_sync_recall:
-        missing = []
-        if not parent_id:
-            missing.append("parent_user_message_id")
-        if not callable(getattr(engine, "submit_query_async", None)):
-            missing.append("query_worker_dispatcher")
-        return tool_error(
-            "query_multimodal requires an interactive QueryWorker answer slot; "
-            "this call cannot deliver the unified current-frame/Recall/Search "
-            "answer and will not fall back to Recall-only.",
-            success=False,
-            code="query_worker_handoff_unavailable",
-            missing=missing,
-        )
-
-    # Only the legacy synchronous compatibility path intrinsically requires a
-    # RecallWorker.  Interactive QueryWorker can answer from ask-time frames or
-    # Search without a memory backend, so this check must remain *after* the
-    # async handoff above.
-    if getattr(engine, "recall_worker", None) is None:
-        return tool_error(
-            "multimodal recall is not available for this non-interactive call "
-            "(memory backend disabled or engine not fully initialized).",
-            success=False)
-
-    try:
-        res = engine.recall_memory(
-            brief=q, user_text=str(_kw.get("user_text") or q),
-            timeout=_RECALL_TIMEOUT_SEC)
-    except Exception as exc:
-        log.warning("[recall] engine.recall_memory raised: %s", exc, exc_info=True)
-        return tool_error(f"recall failed: {exc}", success=False)
-
-    if not res.get("ok", False):
-        err = res.get("error", "recall failed")
-        # Timeout is a soft failure — tell the agent it can retry a narrower
-        # query or escalate to set_live_watcher.
-        if res.get("timed_out"):
-            partial_findings = (
-                (res.get("partial_findings") or res.get("findings") or "").strip()
-                or "\n".join(str(c).strip() for c in (res.get("clues") or [])
-                             if str(c).strip()).strip()
-            )
-            if partial_findings:
-                return tool_result({
-                    "found": True,
-                    "partial": True,
-                    "timed_out": True,
-                    "query": q,
-                    "findings": partial_findings,
-                    "clues": list(res.get("clues") or [])[:8],
-                    "frame_ids": list(res.get("frame_ids") or [])[:20],
-                    "rounds": res.get("rounds", 0),
-                    "elapsed_sec": res.get("elapsed_sec", 0.0),
-                    "recall_trace": list(res.get("recall_trace") or [])[:40],
-                    "note": (
-                        f"Recall hit the outer {_RECALL_TIMEOUT_SEC:.0f}s timeout, "
-                        "but partial findings are available. Prefer these findings "
-                        "when answering. Do not substitute current frames for a "
-                        "historical answer. If the partial findings are insufficient, "
-                        "state the gap or retry with a narrower query."
-                    ),
-                })
-            return tool_result({
-                "found": False,
-                "query": q,
-                "timed_out": True,
-                "note": (
-                    f"Recall timed out after {_RECALL_TIMEOUT_SEC:.0f}s without "
-                    "usable partial findings. Retry with a narrower query or use "
-                    "set_live_watcher for frame-by-frame investigation. Do not "
-                    "substitute current frames for a historical answer."
-                ),
-            })
-        return tool_error(
-            err,
-            success=False,
-            recall_trace=list(res.get("recall_trace") or [])[:40],
-            rounds=res.get("rounds", 0),
-            elapsed_sec=res.get("elapsed_sec", 0.0),
-        )
-
-    findings = (res.get("findings") or "").strip()
-    frame_ids = list(res.get("frame_ids") or [])
-    clues = list(res.get("clues") or [])
-    found = bool(res.get("found"))
-
-    result = {
-        "found": found,
-        "query": q,
-        "findings": findings,
-        # Frame ids retained for internal/UI compatibility and grounding traces.
-        "frame_ids": frame_ids[:20],
-        "rounds": res.get("rounds", 0),
-        "elapsed_sec": res.get("elapsed_sec", 0.0),
-        "recall_trace": list(res.get("recall_trace") or [])[:40],
-    }
-    if res.get("timed_out"):
-        result["timed_out"] = True
-        result["partial"] = bool(res.get("partial"))
-        result["partial_findings"] = res.get("partial_findings") or findings
-    if found:
-        _fid_hint = ""
-        if frame_ids:
-            _fid_hint = (
-                f" Recall returned {len(frame_ids[:20])} grounding frame_id values "
-                f"(see the frame_ids field). Visual follow-ups, including requests "
-                f"to retrieve or inspect historical frames, belong to "
-                f"query_multimodal; frame ids remain available for internal/UI use."
-            )
-        result["note"] = (
-            "These are RecallWorker's distilled findings from multimodal memory; "
-            "answer the user from this evidence. "
-            + ("This recall hit a timeout guard, but findings/partial_findings "
-               "are usable evidence and should be preferred. "
-               if res.get("timed_out") else "")
-            + _fid_hint +
-            " If this is still insufficient, or the task requires rewatching raw "
-            "frames for counting/crop comparison/full-segment scanning/continuous "
-            "research, use set_live_watcher."
-        )
-    else:
-        # Surface clues even when there's no confident finding — better than a
-        # bare "not found" for the agent to reason from.
-        if clues:
-            result["clues"] = clues[:8]
-        result["note"] = (
-            "Multimodal memory did not return content clearly related to this "
-            "query. It may not have been observed yet or may not have settled "
-            "into memory. Do not invent an answer; if necessary use "
-            "set_live_watcher for frame-by-frame investigation, otherwise tell "
-            "the user that there is no reliable memory for it."
-        )
-    return tool_result(result)
+    # to Recall-only when there is no interactive answer slot.
+    #
+    # There used to be a second, synchronous Recall-only path here behind an
+    # ``allow_sync_recall`` opt-in, reachable only from the unregistered legacy
+    # ``recall_multimodal_memory`` wrapper. It had been dead for some time — its
+    # first statement added two sets together and raised TypeError, and the
+    # semaphore it waited on was an asyncio one being acquired synchronously — so
+    # "compatibility entry" described an entry that could not run. Removed rather
+    # than repaired: every live caller goes through the QueryWorker handoff above.
+    missing = []
+    if not parent_id:
+        missing.append("parent_user_message_id")
+    if not callable(getattr(engine, "submit_query_async", None)):
+        missing.append("query_worker_dispatcher")
+    return tool_error(
+        "query_multimodal requires an interactive QueryWorker answer slot; "
+        "this call cannot deliver the unified current-frame/Recall/Search "
+        "answer and will not fall back to Recall-only.",
+        success=False,
+        code="query_worker_handoff_unavailable",
+        missing=missing,
+    )
 
 
 def query_multimodal(
@@ -426,26 +305,6 @@ def query_multimodal(
         query=query,
         session_id=session_id,
         response_mode=response_mode,
-        allow_sync_recall=False,
-        **kwargs,
-    )
-
-
-def recall_multimodal_memory(query=None, session_id=None, **kwargs) -> str:
-    """Backward-compatible Python entry with synchronous Recall support.
-
-    The legacy name is intentionally not registered as a model-visible tool.
-    It still uses QueryWorker when an interactive answer slot exists; otherwise
-    direct Python callers retain the former synchronous RecallWorker behavior.
-    """
-    # The legacy alias has no evidence-mode contract; ignore an accidental
-    # forwarded mode instead of passing the keyword twice.
-    kwargs.pop("response_mode", None)
-    return _query_multimodal_impl(
-        query=query,
-        session_id=session_id,
-        response_mode="direct",
-        allow_sync_recall=True,
         **kwargs,
     )
 

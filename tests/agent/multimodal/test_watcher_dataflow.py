@@ -110,7 +110,7 @@ def _cfg(**over):
     return SimpleNamespace(**base)
 
 
-async def _drive(worker, *, ask_frames, seen=None):
+async def _drive(worker, *, ask_frames, seen=None, query_worker_mode=False):
     sink_out = []
     events = []
 
@@ -123,7 +123,7 @@ async def _drive(worker, *, ask_frames, seen=None):
     task = await worker._spawn_delegation(
         task_instruction="盯桌面", prelude="", sink=sink,
         on_event=on_event, ask_frames_override=list(ask_frames),
-        seen_search_briefs=seen)
+        seen_search_briefs=seen, query_worker_mode=query_worker_mode)
     await task
     return "".join(sink_out), events
 

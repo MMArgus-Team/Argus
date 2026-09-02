@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import base64
+import contextvars
 import importlib.util
 import json
 import logging
@@ -47,6 +48,17 @@ from agent.multimodal._sentinels import (
 )
 
 log = logging.getLogger("hermes.multimodal")
+
+# One retry budget escalation for a structured memory call that came back HTTP
+# 200 with an empty body because the model spent the whole completion cap on
+# hidden reasoning (finish_reason=length, body_len=0). Multiplier, floor and
+# ceiling are module constants so the behaviour is identical for every memory
+# role; the ceiling keeps an already-large caller (writer: 5k) from escalating
+# into a budget that costs more than the answer is worth. Setting the multiplier
+# to 1 disables the escalation.
+_CALL_CHAT_EMPTY_BODY_ESCALATION = 8
+_CALL_CHAT_EMPTY_BODY_MIN_CAP = 2_048
+_CALL_CHAT_EMPTY_BODY_MAX_CAP = 16_384
 
 
 @asynccontextmanager
@@ -86,6 +98,82 @@ class ReviewerEndpointLimiter:
                 async with self._start_lock:
                     self._next_start_at = (
                         time.monotonic() + self._min_start_interval_sec)
+            self._semaphore.release()
+
+
+class RecallConcurrencyLimiter:
+    """Bound how many memory-recall LLM steps are in flight at once.
+
+    This replaces a plain ``asyncio.Lock`` that was shared with MemoryWriter, so
+    a recall step and a writer batch had to take turns. That coupling was wrong
+    on both counts:
+
+    * It cost users badly. A writer wake is ~25 images / ~18k tokens (25-31s
+      measured); a recall step is 4 images (6-12s). A FIFO mutex therefore
+      charged a user-blocking recall a full writer batch at *every* one of its
+      5-9 steps — 140s of one 217s answer, spent entirely in the queue.
+    * It protected nothing. Reviewer, L2/L3 aggregation and scene classification
+      hit the same endpoint without taking that lock (reviewers have their own
+      :class:`ReviewerEndpointLimiter`), so the endpoint already ran several
+      concurrent calls. Serializing exactly two of its consumers bought no
+      safety.
+
+    Writer and recall now run independently — neither waits for the other. What
+    remains is recall's own ceiling: one ReAct round can fan out several recall
+    tasks and several queries may be in flight, with no cap anywhere on that
+    path, so a burst could otherwise put an unbounded number of requests on one
+    endpoint. Steps beyond the limit queue in FIFO order; nothing is dropped.
+
+    In practice QueryWorker shows no tendency to batch: across every ReAct round
+    in the field logs, a round dispatched either zero or exactly one recall (task
+    ids are ``r{round}_r{index}`` and no ``_r1`` was ever emitted), and the
+    dispatch always happened in round 0. So the default sits at the recommended
+    ceiling and the limiter is insurance against a fan-out that has not been
+    observed, not day-to-day traffic shaping.
+    """
+
+    #: Recommended ceiling, not a hard one. Past this the endpoint rather than
+    #: Argus becomes the bottleneck and each extra concurrent call slows down the
+    #: recall already running — but an operator who knows their endpoint may
+    #: legitimately go higher, so a larger value is honoured with a warning
+    #: instead of being silently clamped down to something the operator did not
+    #: ask for.
+    RECOMMENDED_MAX_CONCURRENCY = 5
+
+    def __init__(self, concurrency: int = 5):
+        # Only the lower bound is enforced: 0 or negative cannot mean "unlimited"
+        # (a zero-permit semaphore would deadlock every recall), so it degrades to
+        # serial.
+        self._limit = max(1, int(concurrency or 1))
+        if self._limit > self.RECOMMENDED_MAX_CONCURRENCY:
+            log.warning(
+                "[recall channel] concurrency=%d exceeds the recommended max of "
+                "%d; honouring it, but expect the memory endpoint to become the "
+                "bottleneck — each extra in-flight call also slows the recall "
+                "already running",
+                self._limit, self.RECOMMENDED_MAX_CONCURRENCY)
+        self._semaphore = asyncio.Semaphore(self._limit)
+        self._in_flight = 0
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @property
+    def in_flight(self) -> int:
+        return self._in_flight
+
+    @asynccontextmanager
+    async def slot(self, tag: str = ""):
+        """Hold one recall slot; yields how long admission took, in ms."""
+        started = time.monotonic()
+        await self._semaphore.acquire()
+        self._in_flight += 1
+        waited_ms = (time.monotonic() - started) * 1000.0
+        try:
+            yield waited_ms
+        finally:
+            self._in_flight = max(0, self._in_flight - 1)
             self._semaphore.release()
 
 
@@ -2785,13 +2873,15 @@ class OpenAIMemoryClient(MemoryLLMClient):
         # tokens share the completion budget. Kimi K3 is an exception in our
         # reviewer workload: the large cap lets it reason until the gateway
         # deadline, so keep the caller's explicit budget (reviewer: 3072).
-        if _model_is_kimi_k3(self.model):
-            portable_max = int(max_tokens or 0) or 3072
-        else:
-            portable_max = max(int(max_tokens or 0), 8192)
+        def _portable_cap(cap: int) -> int:
+            if _model_is_kimi_k3(self.model):
+                return int(cap or 0) or 3072
+            return max(int(cap or 0), 8192)
+
         portable_first = _model_prefers_portable_chat_params(self.model)
 
-        def _attempts(cur_messages: List[Dict[str, Any]]):
+        def _attempts(cur_messages: List[Dict[str, Any]], cap: int):
+            portable_max = _portable_cap(cap)
             base_kwargs = {
                 "model": self.model,
                 "messages": cur_messages,
@@ -2805,7 +2895,7 @@ class OpenAIMemoryClient(MemoryLLMClient):
             #   not a sampling knob.
             default_kwargs = dict(
                 base_kwargs,
-                max_tokens=max_tokens,
+                max_tokens=cap,
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             portable_kwargs = dict(
@@ -2818,21 +2908,46 @@ class OpenAIMemoryClient(MemoryLLMClient):
                 #   large reviewer prompts, while low returns usable JSON.
                 portable_kwargs["reasoning_effort"] = "low"
             items = [
-                ("default", default_kwargs, max_tokens),
+                ("default", default_kwargs, cap),
                 ("portable", portable_kwargs, portable_max),
             ]
             return [items[1]] if portable_first else items
 
         last_error: Optional[Exception] = None
-        try:
+
+        def _report_usage(resp: Any) -> None:
+            # ★ #6 TokenMeter: 上报 usage (OpenAI 风格字段).
+            if self.on_usage is None:
+                return
+            u = getattr(resp, "usage", None)
+            if u is None:
+                return
+            try:
+                self.on_usage({
+                    "promptTokenCount": getattr(u, "prompt_tokens", 0) or 0,
+                    "candidatesTokenCount": getattr(u, "completion_tokens", 0) or 0,
+                    "totalTokenCount": getattr(u, "total_tokens", 0) or 0,
+                    "usage_kind": usage_kind,
+                })
+            except Exception:
+                pass
+
+        def _finish_reason(resp: Any) -> str:
+            try:
+                return (getattr(resp.choices[0], "finish_reason", "") or "").lower()
+            except Exception:
+                return ""
+
+        async def _send(cap: int) -> Tuple[Any, str, int]:
+            nonlocal last_error
             resp = None
             used_style = ""
-            used_max_tokens = max_tokens
+            used_max_tokens = cap
             cur_messages = messages
             trimmed_once = False
             while True:
                 restart_after_trim = False
-                for style, kwargs, limit in _attempts(cur_messages):
+                for style, kwargs, limit in _attempts(cur_messages, cap):
                     try:
                         resp = await self.client.chat.completions.create(**kwargs)
                         used_style = style
@@ -2880,30 +2995,56 @@ class OpenAIMemoryClient(MemoryLLMClient):
                 break
             if resp is None:
                 raise last_error or RuntimeError("empty memory LLM response")
-            # ★ #6 TokenMeter: 上报 usage (OpenAI 风格字段).
-            if self.on_usage is not None:
-                u = getattr(resp, "usage", None)
-                if u is not None:
-                    try:
-                        self.on_usage({
-                            "promptTokenCount": getattr(u, "prompt_tokens", 0) or 0,
-                            "candidatesTokenCount": getattr(u, "completion_tokens", 0) or 0,
-                            "totalTokenCount": getattr(u, "total_tokens", 0) or 0,
-                            "usage_kind": usage_kind,
-                        })
-                    except Exception:
-                        pass
-            try:
-                finish = (getattr(resp.choices[0], "finish_reason", "") or "").lower()
-                if finish in {"length", "max_tokens"}:
+            _report_usage(resp)
+            return resp, used_style, used_max_tokens
+
+        try:
+            resp, used_style, used_max_tokens = await _send(max_tokens)
+            finish = _finish_reason(resp)
+            text = _msg_text(resp) or ""
+            if finish in {"length", "max_tokens"}:
+                log.warning(
+                    "[memory client openai] finish=%s style=%s max_tokens=%d "
+                    "body_len=%d; structured JSON may be truncated",
+                    finish, used_style, used_max_tokens, len(text))
+            # A reasoning route spends the completion budget on hidden reasoning
+            # before it emits any visible token, so a tight structured-output cap
+            # comes back HTTP 200 with an EMPTY body and finish=length. The caller
+            # then sees "invalid JSON", burns its retries on the identical cap, and
+            # reports a pure-waste failure minutes later — a 384-token frame-verify
+            # cost 80s and returned nothing on a production reasoning gateway.
+            # Escalate the cap once instead: nothing else about the request changes,
+            # and the alternative is a guaranteed-useless answer.
+            #
+            # Escalate from the budget that was ACTUALLY used, not the caller's
+            # nominal max_tokens. Portable-first routes raise the cap internally
+            # (max(cap, 8192)), so a 1024-token verify already goes out at 8192;
+            # escalating the nominal 1024 lands back on 8192 and buys a
+            # byte-identical retry — a second wasted call, which is precisely the
+            # waste this branch exists to remove.
+            if (finish in {"length", "max_tokens"} and not text.strip()
+                    and _CALL_CHAT_EMPTY_BODY_ESCALATION > 1):
+                escalated = min(
+                    max(int(used_max_tokens or 0)
+                        * _CALL_CHAT_EMPTY_BODY_ESCALATION,
+                        _CALL_CHAT_EMPTY_BODY_MIN_CAP),
+                    _CALL_CHAT_EMPTY_BODY_MAX_CAP,
+                )
+                if escalated > int(used_max_tokens or 0):
                     log.warning(
-                        "[memory client openai] finish=%s style=%s max_tokens=%d "
-                        "body_len=%d; structured JSON may be truncated",
-                        finish, used_style, used_max_tokens,
-                        len(_msg_text(resp) or ""))
-            except Exception:
-                pass
-            return _msg_text(resp)
+                        "[memory client openai] empty body at max_tokens=%d "
+                        "(finish=%s, reasoning budget exhausted); retrying once "
+                        "with max_tokens=%d kind=%s",
+                        used_max_tokens, finish, escalated, usage_kind or "?")
+                    resp, used_style, used_max_tokens = await _send(escalated)
+                    text = _msg_text(resp) or ""
+                    if not text.strip():
+                        log.warning(
+                            "[memory client openai] still empty after escalating "
+                            "to max_tokens=%d (finish=%s) kind=%s",
+                            used_max_tokens, _finish_reason(resp),
+                            usage_kind or "?")
+            return text
         except Exception as e:
             self.last_error = str(e)
             log.warning("[memory client openai] %s", e)
@@ -10515,6 +10656,18 @@ class MemoryToolBox:
     #   frames_limit=0) 走那一段输出。
 
 
+# The owning run's progress emitter, so admission waits can be reported and not
+# just logged: "waiting for the memory channel" and "the model is slow" are
+# minutes apart in cost and a caller can only act on the difference if it is
+# told which one it is.
+_RECALL_PROGRESS: contextvars.ContextVar[Optional[Callable[..., Any]]] = (
+    contextvars.ContextVar("argus_recall_progress", default=None))
+
+# Only report an admission wait a human would notice; the log line keeps its own
+# lower bar for diagnostics.
+_RECALL_CHANNEL_WAIT_REPORT_MS = 1_000.0
+
+
 @asynccontextmanager
 async def _recall_channel_ctx(agent: Any, tag: str):
     """Use RecallAgent's optional shared-channel gate when one is installed.
@@ -10595,7 +10748,8 @@ class RecallAgent:
         #   之后注入。None 时表示 recall 独立端点 (recall_base_url 已配), 不用
         #   跟 writer 共享通道 —— 也就无需抢锁。每次 decide/distill 调 LLM 前
         #   通过 _channel_ctx() 上下文串行化, 让 writer 优先。
-        self.llm_channel_lock: Optional[asyncio.Lock] = None
+        # Installed by MemoryBackend; see RecallConcurrencyLimiter.
+        self.recall_limiter: Optional[Any] = None
 
     # ★ 2026-08-19 收敛: 16 → 10。合并前这份白名单里有 4 组做同一件事的工具
     #   (search_by_time/search_micro/get_subgraph 都查 L1;
@@ -11084,25 +11238,65 @@ class RecallAgent:
 
     @asynccontextmanager
     async def _channel_ctx(self, tag: str):
-        """★ FIX (A): 每次 recall 内部 LLM 调用前包一层 —— 拿到 backend 的
-        LLM 通道锁再发请求, 结束立刻释放。writer 每 wake_interval 秒也去抢
-        同一把锁, 因此 recall 一步 LLM 结束 (~10s) 就让出通道给 writer。
-        锁不存在 (offline / 没走 backend / 独立 recall 端点) → 直接透传。
+        """Hold one recall concurrency slot for this step.
+
+        ``recall_limiter`` is whatever MemoryBackend installed:
+
+        * a :class:`RecallConcurrencyLimiter` (current) — bounds how many recall
+          steps are in flight at once. MemoryWriter is NOT part of it: writer and
+          recall run independently and neither waits for the other.
+        * any acquire+release object (test doubles) — used as a plain gate;
+        * ``None`` (offline, or no backend) — no gate at all.
         """
-        lock = self.llm_channel_lock
-        if lock is None:
+        limiter = self.recall_limiter
+        if limiter is None:
             yield
             return
+        if hasattr(limiter, "slot"):
+            async with limiter.slot(f"recall.{tag}") as waited_ms:
+                if waited_ms > 500:
+                    log.info(
+                        "[recall channel] %s waited %.0fms for a recall slot "
+                        "(limit=%s)", tag, waited_ms,
+                        getattr(limiter, "limit", "?"))
+                if waited_ms >= _RECALL_CHANNEL_WAIT_REPORT_MS:
+                    await self._report_channel_wait(tag, waited_ms)
+                yield
+            return
         t_wait0 = time.time()
-        await lock.acquire()
+        await limiter.acquire()
         wait_ms = (time.time() - t_wait0) * 1000
         try:
             if wait_ms > 500:
-                log.info("[recall channel] %s waited %.0fms for writer", tag, wait_ms)
+                log.info("[recall channel] %s waited %.0fms", tag, wait_ms)
             yield
         finally:
-            try: lock.release()
+            try: limiter.release()
             except Exception: pass
+
+    @staticmethod
+    async def _report_channel_wait(tag: str, waited_ms: float) -> None:
+        """Publish an admission wait on the owning run's progress channel.
+
+        Time spent queueing for a recall slot and time spent inside the model are
+        indistinguishable to whoever is waiting, but they call for opposite
+        responses (raise the concurrency limit vs. ask a smaller question).
+        Reporting the wait is what makes them tellable apart without reading
+        server logs.
+        """
+        emit = _RECALL_PROGRESS.get()
+        if emit is None:
+            return
+        try:
+            result = emit({
+                "phase": "channel_wait",
+                "stage": tag,
+                "waited_ms": round(float(waited_ms)),
+            })
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as exc:
+            log.debug("[recall channel] wait report failed: %s", exc)
 
     def _frames_payload(self, fids: List[str], *,
                         max_n: int = 0) -> List[Dict[str, Any]]:
@@ -11409,6 +11603,9 @@ class RecallAgent:
                 try: await on_progress(ev)
                 except Exception as e: log.warning("[recall progress] %s", e)
 
+        # Set for this task only: each recall run is its own asyncio.Task, so
+        # concurrent runs see independent values.
+        _RECALL_PROGRESS.set(_emit if on_progress is not None else None)
         t0 = time.time()
         # ★ 2026-08-26: 便宜的 screen-text 检索从"短路"降级成"第 0 轮种子观察"。
         #   短路只留给带显式编号引用 (Table 3 / 表3) 且引用词真的出现在命中文本
@@ -12069,7 +12266,8 @@ class RecallAgent:
             try:
                 resp = await self._create_chat_completion(
                     msgs,
-                    max_tokens=384,
+                    max_tokens=max(256, int(getattr(
+                        self.cfg, "recall_verify_max_tokens", 1024) or 1024)),
                     enable_thinking=False,
                     channel_tag="verify_frames",
                     client_override=verify_client,

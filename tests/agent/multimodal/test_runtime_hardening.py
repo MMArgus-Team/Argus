@@ -5,14 +5,13 @@ import base64
 import io
 import struct
 import threading
-import time
 from types import SimpleNamespace
 
 from PIL import Image
 
 from agent.multimodal._memory import Frame, FrameBuffer, SearchFact, SearchFactStore
 from agent.multimodal.memory_backend import MemoryBackend, _pcm16_signal_metrics
-from agent.multimodal.watcher_engine import BackendRecallProxy, WatcherAgent
+from agent.multimodal.watcher_engine import BackendRecallProxy
 from tui_gateway.server import _audio_container_signature, _resolve_env_audio_window
 
 
@@ -160,7 +159,7 @@ def test_memory_backend_publishes_ready_and_stops_cleanly():
     def build():
         backend.cfg = SimpleNamespace()
         backend.mem = _MemStub()
-        backend.recall_agent = SimpleNamespace(llm_channel_lock=None)
+        backend.recall_agent = SimpleNamespace(recall_limiter=None)
         return True
 
     backend._build = build
@@ -170,45 +169,6 @@ def test_memory_backend_publishes_ready_and_stops_cleanly():
     assert backend.stop(timeout=2.0) is True
     assert backend.state == backend.STATE_STOPPED
     assert backend.is_stopped is True
-
-
-def test_query_admission_limits_running_and_pending_work():
-    engine = WatcherAgent.__new__(WatcherAgent)
-    engine._query_lock = threading.RLock()
-    engine._query_max_concurrency = 1
-    engine._query_max_pending = 1
-    engine._query_running = 0
-    engine._query_pending = 0
-    engine._query_semaphore = threading.BoundedSemaphore(1)
-    release = threading.Event()
-    started = threading.Event()
-
-    def recall(*_args, **_kwargs):
-        started.set()
-        assert release.wait(2.0)
-        return {"ok": True}
-
-    engine._recall_memory_unbounded = recall
-    results = []
-    first = threading.Thread(
-        target=lambda: results.append(engine.recall_memory("first", timeout=2.0)))
-    second = threading.Thread(
-        target=lambda: results.append(engine.recall_memory("second", timeout=2.0)))
-    first.start()
-    assert started.wait(1.0)
-    second.start()
-
-    deadline = time.time() + 1.0
-    while engine._query_pending != 1 and time.time() < deadline:
-        time.sleep(0.01)
-    rejected = engine.recall_memory("third", timeout=0.1)
-    assert rejected["queue_full"] is True
-
-    release.set()
-    first.join(2.0)
-    second.join(2.0)
-    assert not first.is_alive() and not second.is_alive()
-    assert len(results) == 2 and all(item["ok"] for item in results)
 
 
 def test_audio_diagnostics_detect_headers_silence_and_time_mapping():

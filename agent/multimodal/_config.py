@@ -385,6 +385,15 @@ class Config:
     recall_verify_max_frames: int = 8        # 单次 verify 最多验几张召回帧
     recall_verify_retries: int = 1           # verify 格式错误/临时过载时额外重试次数
     recall_verify_retry_delay_sec: float = 0.5
+    # verify 只需要吐一小段 JSON, 但推理型端点会先把预算花在隐藏推理上: 384 在
+    # GPT-5.6 这类路由上稳定返回空 body (finish=length), 于是两次尝试白烧 80s。
+    # 给一个能装下 "推理 + 小 JSON" 的下限; client 侧还有一次自动升配兜底。
+    recall_verify_max_tokens: int = 1_024
+    # 同时在飞的 recall LLM 步骤上限 (RecallConcurrencyLimiter)。writer 不参与:
+    # 二者各跑各的, 互不等待。旧实现是跟 writer 共享的一把互斥锁, 等效并发 1,
+    # 且每步都要等一个 ~28s 的 writer 批次。
+    # 5 是"建议上限"而非硬上限: 配更大只打 warning 不拦截 (端点会先成为瓶颈)。
+    recall_max_concurrency: int = 5
 
     # ---- 对话历史 ----
     conv_max_chars: int = 100_000

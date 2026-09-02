@@ -134,7 +134,7 @@ class TestRecallAgentRoleModel(unittest.IsolatedAsyncioTestCase):
                 self.releases += 1
 
         channel = _CountingChannel()
-        recall.llm_channel_lock = channel
+        recall.recall_limiter = channel
 
         self.assertEqual(
             await recall._distill(
