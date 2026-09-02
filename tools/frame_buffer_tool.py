@@ -1,13 +1,8 @@
-"""frame_buffer toolset — main-agent access to the live video FrameBuffer.
+"""Frame-buffer helpers for live multimodal sessions.
 
-Peer to the `monitor` toolset (tools/monitor_tool.py). Exposes:
-  * ``get_current_frame``  — grab the ~3 most recent frames (send-time anchor)
-  * ``check_video_stream`` — is the camera/screen-share on?
-  * ``show_memory_frame``  — retrieve historical keyframes from multimodal memory
-
-Visibility: registered on the global tool registry, so only the main agent (which
-loads the registry) sees it. MonitorAgent / WatcherAgent run their own engines
-and never load this registry, so they can't call it.
+Only ``check_video_stream`` is registered as a main-agent tool. Current and
+historical frame retrieval functions remain internal compatibility helpers;
+model-facing visual requests are routed through ``query_multimodal``.
 """
 
 from __future__ import annotations
@@ -80,7 +75,7 @@ CHECK_VIDEO_STREAM_SCHEMA = {
         "status query, answer from this result and stop. Do not call "
         "list_live_watcher or set_* tools afterward.\n"
         "Do not use this as a preflight for set_monitor, set_live_watcher, or "
-        "get_current_frame; those tools validate the video source themselves. A "
+        "query_multimodal; those tools validate the video source themselves. A "
         "clear new monitor request should call set_monitor(op='create') directly. "
         "Main agent only."
     ),
@@ -244,53 +239,6 @@ async def get_current_frame(session_id: Optional[str] = None,
                  "frame_ts": [getattr(f, "ts", None) for f in frames]},
     }
 
-
-GET_CURRENT_FRAME_SCHEMA = {
-    "name": "get_current_frame",
-    "description": (
-        "Inspect the user's current screen/camera view. Returns the frames from "
-        "the moment this user message was sent plus nearby predecessor frames "
-        "(3 frames total). The anchor frame may be a few frames behind the latest "
-        "buffer frame by design, so it matches the moment the user asked.\n"
-        "Pass query with the specific visual question you want answered. If the "
-        "main model is not vision-capable, the system uses query + frames with "
-        "auxiliary.vision and returns a text answer; if the main model is "
-        "vision-capable, it returns images directly.\n"
-        "Use this when the user explicitly asks to retrieve/show/inspect the raw "
-        "current frames. For a one-shot question grounded in current or past "
-        "camera/screen context, call query_multimodal instead. If desktop control is needed "
-        "(clicking, typing, scrolling, dragging, launching apps), use "
-        "computer_use instead."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": (
-                    "Natural-language question about the current frames. If the "
-                    "main model is text-only, this question is sent with the "
-                    "frames to auxiliary.vision and the tool returns a text "
-                    "answer. If omitted, the user's most recent message is used."
-                ),
-            },
-        },
-        "required": [],
-    },
-}
-
-
-registry.register(
-    name="get_current_frame",
-    toolset="live_watcher",
-    schema=GET_CURRENT_FRAME_SCHEMA,
-    handler=lambda args, **kw: get_current_frame(
-        session_id=kw.get("session_id"),
-        query=(args or {}).get("query")),
-    is_async=True,
-    emoji="📸",
-)
-
 registry.register(
     name="check_video_stream",
     toolset="live_watcher",
@@ -300,7 +248,7 @@ registry.register(
 )
 
 
-# ── show_memory_frame: 从记忆里取【历史关键帧真图】给用户看 ────────────────────
+# ── show_memory_frame: internal historical-frame compatibility helper ────────
 # 用途: 用户问"给我看看当时那瓶乌龙茶的样子" / "上次的那本书张什么样" —— 需要把
 # 已经存在 entity_rep_frames / FrameStore(内存+磁盘) 的关键帧图片回投给用户。
 # 与 get_current_frame 的区别: 那个只看当前 buffer 的 ~3s 内新鲜帧; 本工具查
@@ -612,57 +560,3 @@ def show_memory_frame(entity_name: Optional[str] = None,
             "text_evidence": text_evidence,
         },
     }
-
-
-SHOW_MEMORY_FRAME_SCHEMA = {
-    "name": "show_memory_frame",
-    "description": (
-        "Retrieve real historical key-frame images from multimodal memory for "
-        "display to the user. Use this when the user wants to see what something "
-        "looked like earlier or asks to bring up a historical frame.\n"
-        "Unlike get_current_frame, which only sees the current live buffer, this "
-        "tool reads persisted historical key frames from entity_rep_frames and "
-        "FrameStore, including disk-backed frames across sessions.\n"
-        "Usually pair it with query_multimodal: query first to identify "
-        "the entity name, then call this tool with entity_name. If you already "
-        "know the exact item name, call this tool directly.\n"
-        "For factual historical questions about label text, nutrition, capacity, "
-        "or counts, call query_multimodal first; this tool is for showing "
-        "or visually verifying the original image.\n"
-        "Pass either entity_name (recommended, fuzzy match) or frame_id (exact). "
-        "The returned _multimodal images are automatically displayed to the user."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "entity_name": {
-                "type": "string",
-                "description": (
-                    "Item/entity name. Supports fuzzy matching via exact name, "
-                    "LIKE matching, and aliases."
-                ),
-            },
-            "frame_id": {
-                "type": "string",
-                "description": (
-                    "Exact frame_id in f_xxxxxxxxxx format, usually obtained "
-                    "from recall results."
-                ),
-            },
-        },
-        "required": [],
-    },
-}
-
-
-registry.register(
-    name="show_memory_frame",
-    toolset="live_watcher",
-    schema=SHOW_MEMORY_FRAME_SCHEMA,
-    handler=lambda args, **kw: show_memory_frame(
-        entity_name=args.get("entity_name"),
-        frame_id=args.get("frame_id"),
-        session_id=kw.get("session_id"),
-    ),
-    emoji="🖼️",
-)

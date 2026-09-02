@@ -4,8 +4,10 @@
 
 # Argus
 
-Argus 是一个实时多模态 AI Agent，可以观看共享屏幕或摄像头，采集用户语音和
-环境音频，回答与当前/历史画面有关的问题，并执行持续监控和视频深度研究。
+Argus 是一个能"边看边聊"的多模态 AI 助手：主 Agent 处理用户文本与语义路由，**不会被动收到直播画面**；一次性视觉问题和持续视频任务分别交给专用 worker。两种对外多模态模式：
+
+- **一次性视觉问答** —— 当前、历史或“画面实体 + 外部事实”的 mixed 问题统一进入 `query_multimodal`。QueryWorker 读取提问时刻的近期帧，再按需直接作答、召回历史记忆或检索外部资料。
+- **持续监控 / 深度研究** —— `set_monitor`（等某事件出现→提醒）与 `set_live_watcher`（后台持续逐段深研，产出过程与最终报告）两个后台 Agent。watcher 只有一种模式：从最近一段起、按 TTL + 帧数双门逐轮分析，直到视频流停止或用户停止（无 qa/analysis/research 分类）。
 
 [English](README.md) · [Español](README.es.md) · [اردو](README.ur-pk.md)
 

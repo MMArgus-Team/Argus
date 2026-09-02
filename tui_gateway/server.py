@@ -2038,7 +2038,7 @@ def _promote_session_to_multimodal(sid: str, session: dict) -> bool:
     (``source=tool``) stayed non-multimodal forever — even after the dashboard's
     /multimodal page reopened it with ``source=multimodal``. The agent then had
     no frame_buffer and no MonitorEngine, so set_monitor failed with
-    "Monitor backend 未就绪" and get_current_frame/recall had nothing to read.
+    "Monitor backend 未就绪" and query_multimodal/Recall had nothing to read.
 
     Promotion is the same sequence _start_agent_build runs for a natively-built
     MM session (frame_buffer → memory backend → watcher → monitor engine), minus
@@ -4241,10 +4241,9 @@ def _commit_mm_query_turn_projection(
 def _strip_history_image_parts(history: list) -> list:
     """Drop image parts from PAST user turns before sending history to the LLM.
 
-    Live video frames enter the conversation as get_current_frame tool results
-    (v33: the main agent is never passively injected — it must call the tool).
-    Those frame-laden messages get persisted into session["history"], so without
-    this every turn would replay ALL previous turns' frames too — image count
+    Legacy/internal frame results and user attachments may persist image parts
+    into session["history"]. Without this, later turns could replay previous
+    frames too — image count
     (and prefill tokens) grow linearly and the turn gets slower and slower (the
     "越用越卡" bug). We keep ONLY the current turn's freshly-fetched frames: strip
     image_url parts from every historical user message, leaving its text.
@@ -4907,9 +4906,8 @@ def _history_tool_result(name: str, content: object) -> tuple[str, str]:
     if content is None:
         return "", ""
 
-    # Tool results can carry multimodal parts — get_current_frame returns a
-    # ~2.5-3.8 MB base64 image_url per call, and a monitored session accumulates
-    # ~10 of them. Those images are never rendered from the history body (the
+    # Legacy/internal tool results can carry large base64 image_url parts.
+    # Those images are never rendered from the history body (the
     # cap below keeps only a meaningless 1000-char base64 tail); worse, feeding
     # the raw data: URL into _redact_tui_display_text runs the secret-scan regex
     # over multiple megabytes of base64 — ~10s PER image, ~62s per resume of a
@@ -12260,6 +12258,7 @@ def _reconcile_stale_mm_jobs(history: list, agent=None,
                     state.get("hook_main_agent", False)),
                 "hook_instruction": str(
                     state.get("hook_instruction") or ""),
+                "pacing_mode": str(state.get("pacing_mode") or ""),
                 "ttl": str(state.get("ttl") or ""),
                 "ttl_sec": state.get("ttl_sec"),
                 "target_frames": state.get("target_frames"),
@@ -12461,6 +12460,7 @@ def _reconcile_stale_mm_jobs(history: list, agent=None,
                 "label": data.get("label", ""),
                 "hook_main_agent": bool(data.get("hook_main_agent", False)),
                 "hook_instruction": data.get("hook_instruction", ""),
+                "pacing_mode": data.get("pacing_mode", ""),
                 "ttl": data.get("ttl", ""),
                 "ttl_sec": data.get("ttl_sec"),
                 "target_frames": data.get("target_frames"),
@@ -12488,7 +12488,7 @@ def _reconcile_stale_mm_jobs(history: list, agent=None,
                 restored["task_instruction"] = task_text
             if "label" in data:
                 restored["label"] = str(data.get("label") or "")
-            for key in ("ttl", "ttl_sec", "target_frames"):
+            for key in ("pacing_mode", "ttl", "ttl_sec", "target_frames"):
                 if key in data:
                     restored[key] = data.get(key)
             if "hook_main_agent" in data:
@@ -12786,18 +12786,17 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any,
             # vision model for THIS turn ──────────────────────────────────────
             # The browser streams camera/screen frames into the session's
             # FrameBuffer via multimodal.frame. The main agent receives no
-            # passive frame parts; QueryWorker and explicit raw-frame tools use
-            # this anchor to resolve the frames that existed when the user asked.
+            # passive frame parts; QueryWorker uses this anchor to resolve the
+            # frames that existed when the user asked.
             _trace_fn = session.get("_mm_trace")
             if _trace_fn:
                 _trace_fn("before_vision_anchor")
             # ★ 记下"本条 UserMessage 发送时刻"的原始帧锚点。一次性
             #   QueryWorker 会据此取服务器实际收到的、未经 dHash 去重的
             #   ask-time 前 3 帧。不在工具真正执行时取 latest，避免混入提问
-            #   后才出现的画面。get_current_frame 仍可以用该时间边界取稀疏原图。
+            #   后才出现的画面。内部兼容帧读取也可复用该时间边界。
             #   ★ v33: 主 Agent 【永不】被动注入图像帧。一次性当前/历史视觉问答
-            #   交给 query_multimodal；用户明确要求取回/查看原始当前帧时才调
-            #   get_current_frame。这里只 stamp 锚点, 不注入任何帧。
+            #   统一交给 query_multimodal。这里只 stamp 锚点, 不注入任何帧。
             try:
                 _fb = getattr(agent, "frame_buffer", None)
                 # Push-to-talk manual ASR snapshots this value at the user's
@@ -12819,8 +12818,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any,
                 session["_mm_send_anchor_ts"] = _raw_anchor
             except Exception:
                 session["_mm_send_anchor_ts"] = None
-            # ★ 同时记下"本条用户消息文本", 供 get_current_frame 在 supports_vision=false
-            #   时作为 VQA fallback 的兜底 query (主 agent 未显式传 query 才用)。
+            # ★ 保留本条用户消息文本，供内部兼容帧读取的 VQA fallback 使用。
             try:
                 if isinstance(run_message, str):
                     session["_mm_last_user_text"] = run_message
@@ -15179,11 +15177,11 @@ def _(rid, params: dict) -> dict:
     except Exception:
         return _err(rid, 4017, "pcm_b64 not valid base64")
     try:
-        delivered = bool(engine.asr_audio(str(turn.get("key") or ""), pcm))
+        accepted = bool(engine.asr_audio(str(turn.get("key") or ""), pcm))
     except Exception as exc:
         logger.debug("asr_audio failed: %s", exc)
-        delivered = False
-    if not delivered:
+        accepted = False
+    if not accepted:
         if turn.get("mode") == "manual_turn":
             with turn["lock"]:
                 turn["audio_delivery_failed"] = True

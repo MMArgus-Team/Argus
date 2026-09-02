@@ -82,18 +82,10 @@ _HERMES_CORE_TOOLS = [
     "set_live_watcher", "list_live_watcher", "get_live_watcher",
     "query_multimodal",
     "set_monitor",
-    # Main-agent live-frame access. get_current_frame = one-shot "看当前画面"
-    # (send-time anchor frame + neighbors, 3 images). Main-agent-only
-    # (MonitorAgent/WatcherAgent don't load this registry) and self-gates to
-    # sessions with a live FrameBuffer (tool_error otherwise).
-    # check_video_stream = 无参, 返回视频流是否开启 (True/False), 仅用于明确的
-    # 状态查询/真实指代歧义；set_monitor/set_live_watcher/get_current_frame 会自行
-    # 校验前置条件，不应例行先查 (同为主 agent 核心工具)。
-    "get_current_frame", "check_video_stream",
-    # show_memory_frame = 从历史多模态记忆 (entity_rep_frames + FrameStore 磁盘)
-    # 取出关键帧真图给用户看。用户问"给我看看当时那个 X"时的必备工具, 与
-    # get_current_frame (只看当前 buffer) 互补: 前者查历史, 后者查现在。
-    "show_memory_frame",
+    # Explicit live-stream status only. One-shot current/historical visual
+    # requests go through query_multimodal; raw frame helpers remain internal
+    # implementation details and are not exposed to the main agent.
+    "check_video_stream",
     # Cronjob management
     "cronjob",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -294,16 +286,13 @@ TOOLSETS = {
             "Multimodal live-stream tools: "
             "set_live_watcher (create/update/delete a continuous research task), "
             "list_live_watcher (list running tasks), get_live_watcher (read one "
-            "task's progress), query_multimodal (one-shot current/historical "
-            "visual question via QueryWorker), show_memory_frame (fetch a historic key "
-            "frame image from memory to show the user), get_current_frame (grab "
-            "the current picture from the live stream), check_video_stream "
+            "task's progress), query_multimodal (all one-shot current/historical "
+            "visual questions and frame retrieval via QueryWorker), check_video_stream "
             "(is the camera/screen-share on?)."
         ),
         "tools": [
             "set_live_watcher", "list_live_watcher", "get_live_watcher",
-            "query_multimodal", "show_memory_frame",
-            "get_current_frame", "check_video_stream",
+            "query_multimodal", "check_video_stream",
         ],
         "includes": []
     },
@@ -320,10 +309,9 @@ TOOLSETS = {
         "includes": []
     },
 
-    # NOTE: the former standalone `frame_buffer` toolset was removed — its
-    # tools (get_current_frame, check_video_stream, show_memory_frame) are now
-    # main-agent core (in _HERMES_CORE_TOOLS), same as set_monitor /
-    # set_live_watcher. frame_buffer_reader was deleted (unused dead tool).
+    # NOTE: the former standalone `frame_buffer` toolset was removed.
+    # check_video_stream remains main-agent core; raw current/history frame
+    # helpers are internal and one-shot visual requests use query_multimodal.
 
     # "honcho" toolset removed — Honcho is now a memory provider plugin.
     # Tools are injected via MemoryManager, not the toolset system.

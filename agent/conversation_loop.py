@@ -134,16 +134,15 @@ def _project_message_for_current_turn(
 ) -> Dict[str, Any]:
     """Build one API-bound message without replaying stale live-frame pixels.
 
-    ``get_current_frame`` returns real image parts so the model can inspect the
-    current view on the *next iteration of the same turn*.  Keeping those bytes
-    in the canonical in-memory transcript is useful for that iteration and for
-    the UI, but replaying them on a later user turn makes an old frame look
-    current again and also pays the vision-prefill cost repeatedly.
+    Legacy ``get_current_frame`` results contain real image parts. Keeping this
+    projection preserves old sessions and internal callers without exposing the
+    helper as a current model tool; replaying those bytes on a later user turn
+    would make an old frame look current and pay vision-prefill repeatedly.
 
     The turn boundary is explicit: ``current_turn_user_idx`` points at the user
     message appended by :func:`build_turn_context`; historical messages are
     before it and tool results produced during this turn are after it.  Project
-    only historical ``get_current_frame`` tool results, removing image parts
+    only historical legacy ``get_current_frame`` tool results, removing image parts
     while keeping their text, call id, tool name, and every provider-owned
     assistant/tool-call block unchanged.  The canonical message is never
     mutated.  User attachments and image results from every other tool remain
@@ -1321,7 +1320,7 @@ def run_conversation(
         # current turn, shifting the index returned by build_turn_context.
         # Prefer the original user dict's identity. Internal continuation and
         # recovery users are explicitly marked, so they cannot move the boundary
-        # forward and make a same-turn get_current_frame result look historical.
+        # forward and make a same-turn legacy frame result look historical.
         # Keep stale-frame projection and ephemeral user-context injection
         # aligned with the repaired list.
         current_turn_user_idx = _current_turn_boundary_index(

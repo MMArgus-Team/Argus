@@ -177,7 +177,13 @@ class TestContinuousLoop(unittest.TestCase):
         eng._loop = loop
         eng._emit_cb = None
         eng._on_delegation_complete = None
+        eng._on_delegation_start = None
+        eng._on_round_report = None
+        eng._research_registry_cb = None
+        eng._delegation_lock = threading.RLock()
+        eng._delegation_pending = set()
         eng._stop_events = {}
+        eng._stop_reasons = {}
         eng._clarify_events = {}
         eng._clarify_answers = {}
         eng._active = {}
@@ -194,6 +200,43 @@ class TestContinuousLoop(unittest.TestCase):
         eng.client = object()
         eng.model = "m"
         return eng
+
+    def test_submit_then_immediate_delete_cannot_start_ghost_run(self):
+        """A delete before the coroutine's first loop turn must be retained."""
+        async def run():
+            eng = self._make_engine(asyncio.get_running_loop())
+            eng.frame_buffer = _MockBuf()
+            responder = _StubResponder()
+            eng.responder = responder
+            registry = {"race1": {"_deleted": True, "status": "stopping"}}
+            eng._research_registry_cb = lambda rid: registry.get(rid)
+            completed = []
+            eng._on_delegation_complete = (
+                lambda rid, _task, _summary, reason:
+                completed.append((rid, reason)))
+
+            rid = eng.submit_complex_async("watch", request_id="race1")
+            self.assertEqual(rid, "race1")
+            with eng._delegation_lock:
+                future = eng._active[rid]
+                self.assertIn(rid, eng._delegation_pending)
+
+            # This call runs before the scheduled coroutine can create its Event.
+            # It must still report an active stop so the tool keeps its tombstone.
+            self.assertTrue(eng.stop_delegation(rid, reason="deleted"))
+            self.assertEqual(eng._stop_reasons[rid], "deleted")
+
+            await asyncio.wait_for(asyncio.wrap_future(future), timeout=2.0)
+            await asyncio.sleep(0)  # allow the Future done callback to run
+
+            self.assertEqual(responder.batches, [])
+            self.assertEqual(completed, [(rid, "deleted")])
+            self.assertNotIn(rid, eng._active)
+            self.assertNotIn(rid, eng._delegation_pending)
+            self.assertNotIn(rid, eng._stop_events)
+            self.assertNotIn(rid, eng._stop_reasons)
+
+        asyncio.run(run())
 
     def test_analysis_multi_batch_dedup(self):
         import agent.multimodal.watch_file as D

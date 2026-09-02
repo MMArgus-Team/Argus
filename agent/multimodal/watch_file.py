@@ -119,6 +119,10 @@ def init_file(request_id: str, *, query: str, session_id: str = "",
             "task_instruction": query1,
             "label": "",
             "status": "running",
+            # Empty means a pre-pacing-mode/legacy entry whose stored numeric
+            # values stay authoritative.  The live_watcher tool always writes
+            # either "auto" or "explicit" for newly created tasks.
+            "pacing_mode": "",
             "ttl": "",
             "ttl_sec": None,
             "target_frames": None,

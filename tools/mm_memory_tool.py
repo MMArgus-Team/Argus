@@ -369,8 +369,7 @@ def _query_multimodal_impl(
         "found": found,
         "query": q,
         "findings": findings,
-        # frame_ids the recall grounded on — handy if a follow-up needs the real
-        # pixels via set_live_watcher.
+        # Frame ids retained for internal/UI compatibility and grounding traces.
         "frame_ids": frame_ids[:20],
         "rounds": res.get("rounds", 0),
         "elapsed_sec": res.get("elapsed_sec", 0.0),
@@ -385,12 +384,9 @@ def _query_multimodal_impl(
         if frame_ids:
             _fid_hint = (
                 f" Recall returned {len(frame_ids[:20])} grounding frame_id values "
-                f"(see the frame_ids field). If the user wants to see the real "
-                f"historical image, call show_memory_frame immediately. Prefer "
-                f"show_memory_frame(entity_name='<item name>'), or pass the first "
-                f"frame_id: show_memory_frame(frame_id='{frame_ids[0]}'). "
-                f"Do not claim that multimodal memory does not store images; "
-                f"frames are persisted and there is a dedicated retrieval tool."
+                f"(see the frame_ids field). Visual follow-ups, including requests "
+                f"to retrieve or inspect historical frames, belong to "
+                f"query_multimodal; frame ids remain available for internal/UI use."
             )
         result["note"] = (
             "These are RecallWorker's distilled findings from multimodal memory; "
@@ -477,9 +473,9 @@ QUERY_MULTIMODAL_SCHEMA = {
         "In direct mode, after this tool returns a handoff, do not synthesize a "
         "second answer; it must be the first and only tool in that turn. In evidence "
         "mode, do not answer yet: consume the evidence and continue with the needed "
-        "tools in subsequent rounds. Use "
-        "get_current_frame only when raw current frames must be retrieved or shown; "
-        "use set_monitor for a future trigger and set_live_watcher for continuous "
+        "tools in subsequent rounds. All one-shot requests to inspect, retrieve, "
+        "describe, or reason about current or historical live frames belong here. "
+        "Use set_monitor for a future trigger and set_live_watcher for continuous "
         "or deep stream analysis."
     ),
     "parameters": {

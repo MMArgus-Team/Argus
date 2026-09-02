@@ -31,9 +31,9 @@
 
 主 Agent 的铁律是：**按完整语义路由，不用文字关键词硬匹配子路径**。当前画面、历史画面和视觉实体相关的外部知识问题都先交给 `query_multimodal`；“先看提问时刻帧，还是先 Recall/Search”是 QueryWorker 内部的决策。
 
-`get_current_frame` 是一个更窄的诊断/取帧工具：只在用户明确要求取回、展示或检查最新原始帧时用，不应替代 `query_multimodal` 承担普通视觉问答。
+取回、展示、检查或描述当前/历史帧也统一走 `query_multimodal`；底层原始帧读取函数只保留作内部兼容，不再暴露给主 Agent。
 
-这些能力装配成两个 toolset（[toolsets.py:286](toolsets.py)）：`live_watcher`（含 `query_multimodal` / `set_live_watcher` / `get_current_frame` 等）和 `monitor`（仅含 `set_monitor`；列表由前端 registry 展示），彼此平级、独立。这里有个曾经踩过的坑：`live_watcher` 是**非 CONFIGURABLE** 的——曾因为组内某个成员不在平台的 composite 工具列表里，导致整组工具在 dashboard 里凭空消失。所以它走的是"非 configurable 平台工具兜底恢复"的路径。
+这些能力装配成两个 toolset（[toolsets.py:286](toolsets.py)）：`live_watcher`（含 `query_multimodal` / `set_live_watcher` / `check_video_stream` 等）和 `monitor`（仅含 `set_monitor`；列表由前端 registry 展示），彼此平级、独立。这里有个曾经踩过的坑：`live_watcher` 是**非 CONFIGURABLE** 的——曾因为组内某个成员不在平台的 composite 工具列表里，导致整组工具在 dashboard 里凭空消失。所以它走的是"非 configurable 平台工具兜底恢复"的路径。
 
 ## 3.2 分层记忆：把连续的流整理成能回忆的形状
 
@@ -209,7 +209,7 @@ stable_parts.append("\n\n".join(tool_guidance))   # ★ 段落级分隔
 
 两个细节值得学：
 
-1. **`MM_LIVE_GUIDANCE` 按能力加入**——只要本会话可见任一多模态实时工具就加入；纯 coding 等不暴露这些工具的 posture 不会收到无法执行的指令。它先明确“主 Agent 永不被动收图”，再按完整语义划分 `query_multimodal`、`get_current_frame`、`set_monitor` 和 `set_live_watcher` 的边界；`check_video_stream` 只用于流状态查询或真实指代歧义。
+1. **`MM_LIVE_GUIDANCE` 按能力加入**——只要本会话可见任一多模态实时工具就加入；纯 coding 等不暴露这些工具的 posture 不会收到无法执行的指令。它先明确“主 Agent 永不被动收图”，再按完整语义划分 `query_multimodal`、`set_monitor` 和 `set_live_watcher` 的边界；`check_video_stream` 只用于流状态查询或真实指代歧义。
 2. **用 `\n\n` 而非空格分隔各块**——每个 guidance 块是独立优化的完整段落，单空格拼接会把块边界糊成一行，让模型分不清"这是另一个主题"。
 
 而整个 stable tier 被缓存（`agent._cached_system_prompt`），**永不 per-turn 重渲染**——这是为了保住上游的 prompt cache 温热。易变的提问时刻像素由 QueryWorker 在任务内取得，稳定的路由规则留在 system prompt；主 Agent 的每轮上下文不需要为注入图片而改写过去消息。

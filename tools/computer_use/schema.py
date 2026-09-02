@@ -26,10 +26,9 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
         "hidden, minimized, or behind another app. Requires cua-driver to "
         "be installed.\n"
         "★ In a multimodal video session, do not use computer_use merely to "
-        "answer an ordinary visual question about the current or past live screen; "
-        "use query_multimodal. If the user explicitly asks only for a raw/latest "
-        "capture or to show/inspect the current live frame (no interaction), use "
-        "get_current_frame. Reserve computer_use for desktop INTERACTION (click, "
+        "answer or fulfill a non-interactive visual request about the current or "
+        "past live screen, including showing or inspecting a frame; use "
+        "query_multimodal. Reserve computer_use for desktop INTERACTION (click, "
         "type, scroll, drag, launch_app), including captures needed to carry out "
         "that interaction."
     ),

@@ -547,9 +547,9 @@ def compress_context(
         # shared marker used by the conversation loop so turn-boundary logic
         # can still find the real inbound user after compression copied the
         # retained tail (and therefore broke object identity).  In particular,
-        # a same-turn get_current_frame result must remain visible to the next
-        # model iteration instead of being mistaken for historical pixels just
-        # because this synthetic user message sits at the end of the list.
+        # a same-turn legacy/internal frame result must remain visible to the
+        # next model iteration instead of being mistaken for historical pixels
+        # just because this synthetic user message sits at the end of the list.
         compressed.append({
             "role": "user",
             "content": todo_snapshot,

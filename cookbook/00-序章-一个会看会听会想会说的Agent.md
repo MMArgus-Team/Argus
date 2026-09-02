@@ -19,10 +19,9 @@ Argus 想做的，是把这位朋友从暗室里放出来。
 
 ## 一句话概括这套系统
 
-Argus 是一个能"边看边聊"的多模态助手。它的主 Agent 处理**用户文本与语义路由**，不被动接收当前画面；一次性视觉问题和"持续盯着视频流"的重活都交给专职 worker。用项目 README 里的话说，多模态能力被切成三种：
+Argus 是一个能"边看边聊"的多模态助手。它的主 Agent 处理**用户文本与语义路由**，不被动接收当前画面；一次性视觉问题和"持续盯着视频流"的重活都交给专职 worker。用项目 README 里的话说，多模态能力被切成两种：
 
-- **一次性视觉问答** —— 当前、历史和 mixed 视觉问题都由主 Agent 调 `query_multimodal` 交给 QueryWorker。QueryWorker 读取提问时刻的近期帧，再决定直接作答、召回历史记忆、检索外部资料或组合使用。
-- **显式原始帧读取** —— `get_current_frame` 只在用户明确要求取回/展示/诊断最新原始帧时使用，不承担普通问答路由。
+- **一次性视觉请求** —— 当前、历史、取回画面和 mixed 视觉问题都由主 Agent 调 `query_multimodal` 交给 QueryWorker。QueryWorker 读取提问时刻的近期帧，再决定直接作答、召回历史记忆、检索外部资料或组合使用。
 - **持续监控 / 深度研究** —— `set_monitor`（等某事件出现→提醒）与 `set_live_watcher`（后台持续逐段深研）两个后台 Agent。
 
 这些能力的背后，是共享同一份 `FrameBuffer` + `MemoryStore` 的多个专职角色（见 [agent/multimodal/__init__.py](agent/multimodal/__init__.py)）。这个"一份感知、多方消费"的设计，是全系统的地基，我们会在每一章反复回到它。

@@ -862,7 +862,11 @@ def test_detach_parks_before_blocked_abort_and_never_overwrites_resume(
 
     def block_abort():
         entered_abort.set()
-        assert release_abort.wait(timeout=2)
+        # _live_session_payload builds the full resume payload before the 50ms
+        # lock assertion below.  Keep this deadlock safety wall comfortably
+        # above slow CI/import startup so it cannot release the capture lock
+        # before the assertion that is meant to prove B remains blocked.
+        assert release_abort.wait(timeout=5)
 
     engine.on_stop = block_abort
     detach_thread = _REAL_THREAD(

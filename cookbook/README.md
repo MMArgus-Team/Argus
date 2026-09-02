@@ -25,7 +25,7 @@ The book is organized around four capability layers — **see, hear, think, spea
 
 ## Architecture in One Sentence
 
-The main Agent handles **user text and semantic routing only**; it does not passively receive live frames. One-shot questions about the present, the past, or "on-screen entity + external facts" all go through `query_multimodal` to QueryWorker, which reads frames at question time and uses Recall/Search as needed. `get_current_frame` is only for explicitly fetching/showing/diagnosing the latest raw frame; Watcher and Monitor handle ongoing deep research and event monitoring respectively. All roles share one `FrameBuffer` + `MemoryStore` — one perception substrate, many consumers.
+The main Agent handles **user text and semantic routing only**; it does not passively receive live frames. One-shot requests about the present, the past, frame retrieval, or "on-screen entity + external facts" all go through `query_multimodal` to QueryWorker, which reads frames at question time and uses Recall/Search as needed. Watcher and Monitor handle ongoing deep research and event monitoring respectively. All roles share one `FrameBuffer` + `MemoryStore` — one perception substrate, many consumers.
 
 ## Tech Stack at a Glance
 

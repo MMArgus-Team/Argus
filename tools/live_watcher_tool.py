@@ -354,6 +354,15 @@ _TTL_PACING, _PACE_TO_TTL = _build_ttl_pacing()
 _DEFAULT_TTL_LABEL = _PACE_TO_TTL.get("medium", "1min")   # 兜底档 = medium
 
 
+def _pacing_mode_for_ttl(ttl) -> str:
+    """Return ``explicit`` only for a concrete supported user TTL."""
+    return (
+        "explicit"
+        if str(ttl or "").strip().lower() in _TTL_PACING
+        else "auto"
+    )
+
+
 def _resolve_ttl_pacing(ttl, engine, agent):
     """Resolve (ttl_label, ttl_sec, target_frames).
 
@@ -459,6 +468,7 @@ def set_live_watcher(task_instruction=None, session_id=None, op=None,
             ent["_pending_update"] = True   # engine picks up new text next round
         if ttl is not None:
             _lbl, _sec, _tf = _resolve_ttl_pacing(ttl, engine, agent)
+            ent["pacing_mode"] = _pacing_mode_for_ttl(ttl)
             ent["ttl"] = _lbl
             ent["ttl_sec"] = _sec
             ent["target_frames"] = _tf
@@ -484,6 +494,7 @@ def set_live_watcher(task_instruction=None, session_id=None, op=None,
                 rid,
                 task_instruction=str(ent.get("task_instruction") or ""),
                 label=str(ent.get("label") or ""),
+                pacing_mode=str(ent.get("pacing_mode") or ""),
                 ttl=str(ent.get("ttl") or ""),
                 ttl_sec=ent.get("ttl_sec"),
                 target_frames=ent.get("target_frames"),
@@ -497,6 +508,7 @@ def set_live_watcher(task_instruction=None, session_id=None, op=None,
             "op": "update", "watcher_id": rid, "request_id": rid,
             "task_instruction": ent.get("task_instruction", ""),
             "label": _watcher_label(ent),
+            "pacing_mode": ent.get("pacing_mode", ""),
             "ttl": ent.get("ttl", ""),
             "ttl_sec": ent.get("ttl_sec"),
             "target_frames": ent.get("target_frames"),
@@ -661,6 +673,7 @@ def set_live_watcher(task_instruction=None, session_id=None, op=None,
                 task_instruction=_text,
                 label=str(ent.get("label") or ""),
                 status="running",
+                pacing_mode=str(ent.get("pacing_mode") or ""),
                 ttl=str(ent.get("ttl") or ""),
                 ttl_sec=ent.get("ttl_sec"),
                 target_frames=ent.get("target_frames"),
@@ -710,6 +723,7 @@ def set_live_watcher(task_instruction=None, session_id=None, op=None,
     lbl = (label or "").strip()
     # Resolve the per-round accumulation window (ttl / target frames) from the
     # LLM-supplied ttl, else from the auto-detected current scene.
+    _pacing_mode = _pacing_mode_for_ttl(ttl)
     _ttl_lbl, _ttl_sec, _target_frames = _resolve_ttl_pacing(ttl, engine, agent)
     watch_path = ""
     try:
@@ -722,6 +736,7 @@ def set_live_watcher(task_instruction=None, session_id=None, op=None,
             state={
                 "task_instruction": text,
                 "label": lbl or _watcher_label({"task_instruction": text}),
+                "pacing_mode": _pacing_mode,
                 "ttl": _ttl_lbl,
                 "ttl_sec": _ttl_sec,
                 "target_frames": _target_frames,
@@ -738,6 +753,7 @@ def set_live_watcher(task_instruction=None, session_id=None, op=None,
         "label": lbl or _watcher_label({"task_instruction": text}),
         "hook_main_agent": bool(hook_main_agent),
         "hook_instruction": str(hook_instruction or "").strip(),
+        "pacing_mode": _pacing_mode,
         "ttl": _ttl_lbl, "ttl_sec": _ttl_sec, "target_frames": _target_frames,
         "status": "running", "watch_file": watch_path,
         "created_at": time.time(),
@@ -782,6 +798,7 @@ def set_live_watcher(task_instruction=None, session_id=None, op=None,
         "label": disp_label,
         "status": "running",
         "watch_file": watch_path,
+        "pacing_mode": _pacing_mode,
         "ttl": _ttl_lbl,
         "ttl_sec": _ttl_sec,
         "target_frames": _target_frames,

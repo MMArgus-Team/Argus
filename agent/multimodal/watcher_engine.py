@@ -46,6 +46,7 @@ import re
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable, Dict, Optional
 
@@ -70,6 +71,14 @@ _QUERY_OCR_DEBUG_TOTAL_MAX_CHARS = 5_500
 # session.updated handshake.  Kept as a constant so lifecycle tests can use a
 # short deterministic bound.
 _ASR_START_TIMEOUT_SEC = 12.0
+
+# Keep at most five seconds of the 200ms PCM chunks produced by the desktop.
+# ``asr_audio`` reserves a slot under ``_asr_state_lock`` before posting one
+# drain callback to the owner loop, so a stalled Watcher loop cannot create an
+# unbounded list of ``run_coroutine_threadsafe`` futures.  When full, the oldest
+# audio is discarded: realtime speech should recover at the live edge instead
+# of replaying an ever-growing stale backlog.
+_ASR_AUDIO_MAX_PENDING_CHUNKS = 25
 
 
 def sanitize_query_ocr_debug_evidence(evidence: Any) -> list[dict]:
@@ -381,6 +390,57 @@ def _scene_label_from(thought: str, max_len: int = 16) -> str:
     return label
 
 
+def _resolve_watch_round_pacing(cfg: Any, frame_buffer: Any,
+                                registry: Any) -> tuple[float, int]:
+    """Resolve one Watcher round's ``(ttl_sec, target_frames)``.
+
+    New registry entries distinguish an explicitly user-selected pace from an
+    automatically selected one.  Auto entries retain their create-time values
+    for UI/history display, but those snapshots must not shadow a later scene
+    probe.  Entries persisted before ``pacing_mode`` existed keep the legacy
+    explicit-value behavior so a restart does not silently change their pace.
+    """
+    def _clamp(ttl: Any, target_frames: Any) -> tuple[float, int]:
+        return max(0.05, float(ttl)), max(1, int(target_frames))
+
+    if (isinstance(registry, dict)
+            and registry.get("pacing_mode") != "auto"
+            and registry.get("ttl_sec")
+            and registry.get("target_frames")):
+        return _clamp(registry["ttl_sec"], registry["target_frames"])
+
+    try:
+        scene = frame_buffer.current_scene
+        if (isinstance(scene, dict) and scene.get("ttl_sec")
+                and scene.get("target_frames")):
+            return _clamp(scene["ttl_sec"], scene["target_frames"])
+    except Exception:
+        pass
+
+    # Before the first scene probe completes, an auto task uses the tool's
+    # create-time medium snapshot.  The snapshot is a temporary fallback only:
+    # the scene branch above wins as soon as the controller publishes one.
+    if (isinstance(registry, dict)
+            and registry.get("pacing_mode") == "auto"
+            and registry.get("ttl_sec")
+            and registry.get("target_frames")):
+        return _clamp(registry["ttl_sec"], registry["target_frames"])
+
+    min_batch = getattr(cfg, "watch_min_batch", None)
+    if min_batch:
+        ttl = float(getattr(cfg, "watch_round_ttl_sec", 120.0) or 120.0)
+        return _clamp(ttl, min_batch)
+
+    # Keep the final fallback aligned with scene_dhash's medium tier.  This is
+    # reached only by minimal/legacy engines with neither registry nor config.
+    try:
+        from .scene_dhash import pace_to_pacing
+        medium = pace_to_pacing("medium")
+        return _clamp(medium["ttl_sec"], medium["target_frames"])
+    except Exception:
+        return 60.0, 60
+
+
 class WatcherAgent:
     """Owns the WatcherWorker (single-step ReAct + the ReAct loop, merged into
     one object) plus the RecallAgent.
@@ -466,8 +526,12 @@ class WatcherAgent:
         self._stop = threading.Event()
         self._healthy = False  # True only after _build() succeeds
         # In-flight delegation tasks keyed by request_id (for cancel on stop /
-        # inspection). Router tasks are never mutated once started; this only
-        # tracks them so stop() can cancel and nothing leaks.
+        # inspection). Submissions and completion callbacks run on different
+        # threads, so admission + stop state must move atomically under one lock.
+        # ``_delegation_pending`` covers the short interval after the Future is
+        # submitted but before _run_delegation creates its loop-owned Event.
+        self._delegation_lock = threading.RLock()
+        self._delegation_pending: set[str] = set()
         self._active: dict = {}
         # QueryWorker submissions enter from gateway/tool threads while their
         # completion callbacks run on the Watcher loop thread.  Keep every map
@@ -514,9 +578,16 @@ class WatcherAgent:
         # only while its exact token is still current.
         self._asr_start_tokens: dict[str, object] = {}
         self._asr_state_lock = threading.RLock()
-        # ★ 在飞重连去抖: 上游 ASR WS 死掉时 asr_audio 会触发 _asr_reconnect, 同一 key
-        #   同时只允许一个重连协程 (音频热路径每 200ms 来一片, 不去抖会疯狂并发 connect)。
-        self._asr_reconnecting: set = set()
+        # In-flight reconnect owner by key.  The value is the exact ASR object,
+        # not a boolean/set marker, so a late reconnect from a replaced session
+        # cannot clear or mutate the new owner's state.
+        self._asr_reconnecting: dict[str, Any] = {}
+        # PCM staging is guarded by _asr_state_lock and drained on this engine's
+        # loop.  ``_asr_audio_draining[key]`` is likewise the exact ASR owner,
+        # making replacement/stop a generation-safe linearization point.
+        self._asr_audio_pending: dict[str, deque[bytes]] = {}
+        self._asr_audio_draining: dict[str, Any] = {}
+        self._asr_audio_dropped: dict[str, int] = {}
         # Serial TTS queue: per-turn segments (interim text blocks + final
         # answer) are enqueued and played back-to-back by a single consumer so
         # a later segment never cuts off an earlier one. All segments of one
@@ -755,7 +826,9 @@ class WatcherAgent:
             # session teardown. Without this, a client that disconnects
             # without calling multimodal.asr_stop would leave the WS pinned.
             async def _teardown():
-                for t in list(self._active.values()):
+                with self._delegation_lock:
+                    delegation_futures = list(self._active.values())
+                for t in delegation_futures:
                     try:
                         t.cancel()
                     except Exception:
@@ -788,20 +861,29 @@ class WatcherAgent:
                         return await asr.close(graceful=False)
                     except TypeError:
                         return await asr.close()
-                for _asr in list(self._asr.values()):
+                with self._asr_state_lock:
+                    owned_asr = list(self._asr.values())
+                    self._asr.clear()
+                    self._asr_start_tokens.clear()
+                    self._asr_reconnecting.clear()
+                    self._asr_audio_pending.clear()
+                    self._asr_audio_draining.clear()
+                    self._asr_audio_dropped.clear()
+                for _asr in owned_asr:
                     try:
                         closes.append(_abort_asr(_asr))
                     except Exception:
                         pass
-                self._asr.clear()
                 # Wake any continuous deep-analysis loop blocked polling for
                 # frames so it unwinds instead of hanging past teardown.
-                for _ev in list(self._stop_events.values()):
+                with self._delegation_lock:
+                    delegation_stop_events = list(self._stop_events.values())
+                    self._stop_events.clear()
+                for _ev in delegation_stop_events:
                     try:
                         _ev.set()
                     except Exception:
                         pass
-                self._stop_events.clear()
                 if closes:
                     try:
                         await asyncio.gather(*closes, return_exceptions=True)
@@ -1446,6 +1528,26 @@ class WatcherAgent:
     # session opens a QwenRealtimeASR on THIS engine's loop; partial/final
     # transcripts are surfaced via the two callbacks passed by the gateway.
     # ------------------------------------------------------------------ #
+    def _ensure_asr_runtime_state_locked(self) -> None:
+        """Initialize ASR state added across rolling upgrades.
+
+        Caller must hold ``_asr_state_lock``.  Normal instances create these in
+        ``__init__``; the defensive path also keeps lightweight embedders and
+        lifecycle tests from observing a half-old object shape.
+        """
+        if not hasattr(self, "_asr"):
+            self._asr = {}
+        if not hasattr(self, "_asr_start_tokens"):
+            self._asr_start_tokens = {}
+        if not isinstance(getattr(self, "_asr_reconnecting", None), dict):
+            self._asr_reconnecting = {}
+        if not hasattr(self, "_asr_audio_pending"):
+            self._asr_audio_pending = {}
+        if not hasattr(self, "_asr_audio_draining"):
+            self._asr_audio_draining = {}
+        if not hasattr(self, "_asr_audio_dropped"):
+            self._asr_audio_dropped = {}
+
     def asr_start(self, key: str,
                   on_partial: Callable[[str], None],
                   on_final: Callable[[str], None],
@@ -1474,10 +1576,9 @@ class WatcherAgent:
         if state_lock is None:
             state_lock = threading.RLock()
             self._asr_state_lock = state_lock
-        if not hasattr(self, "_asr_start_tokens"):
-            self._asr_start_tokens = {}
         start_token = object()
         with state_lock:
+            self._ensure_asr_runtime_state_locked()
             self._asr_start_tokens[key] = start_token
         fut = asyncio.run_coroutine_threadsafe(
             self._asr_start(
@@ -1514,18 +1615,23 @@ class WatcherAgent:
         if state_lock is None:
             state_lock = threading.RLock()
             self._asr_state_lock = state_lock
-        if not hasattr(self, "_asr_start_tokens"):
-            self._asr_start_tokens = {}
         if start_token is None:
             start_token = object()
             with state_lock:
+                self._ensure_asr_runtime_state_locked()
                 self._asr_start_tokens[key] = start_token
         with state_lock:
+            self._ensure_asr_runtime_state_locked()
             if self._asr_start_tokens.get(key) is not start_token:
                 return False
         # Replace any stale session for this key.
         with state_lock:
             old = self._asr.pop(key, None)
+            self._asr_reconnecting.pop(key, None)
+            self._asr_audio_pending.pop(key, None)
+            self._asr_audio_dropped.pop(key, None)
+            if self._asr_audio_draining.get(key) is old:
+                self._asr_audio_draining.pop(key, None)
         if old is not None:
             try:
                 try:
@@ -1605,70 +1711,172 @@ class WatcherAgent:
         return False
 
     def asr_audio(self, key: str, pcm: bytes) -> bool:
-        """Thread-safe: feed a PCM16 chunk into an open ASR session.
+        """Thread-safe, non-blocking PCM admission for an open ASR session.
 
-        ★ 自愈: 上游 DashScope ASR WS 可能在长时会话中静默死掉 (网络抖动/服务端 idle
-          超时/其它帧错误连带), 死后 append_audio 会静默丢弃音频 → "说什么没反应"。
-          这里在喂音频前检测连接: 死了就触发一次去抖重连 (本片音频丢弃, 下一片到时若
-          已重连就正常识别), 让会话自愈, 不再永久失灵。"""
+        This method never waits for the Watcher event loop or WebSocket send.
+        It reserves bounded queue space under ``_asr_state_lock`` and schedules
+        at most one drain coroutine for the exact ASR owner.  ``True`` therefore
+        means accepted for delivery, not that the upstream socket has already
+        acknowledged the chunk.
+        """
         loop = self._loop
-        asr = self._asr.get(key)
-        if loop is None or asr is None or not pcm:
+        if loop is None or loop.is_closed() or not pcm:
             return False
-        # 上游死了 → 触发去抖重连 (同 key 只跑一个), 本片丢弃。
-        if not getattr(asr, "is_connected", True):
-            if key not in self._asr_reconnecting:
-                self._asr_reconnecting.add(key)
-                try:
-                    asyncio.run_coroutine_threadsafe(self._asr_reconnect(key), loop)
-                except Exception as exc:
-                    self._asr_reconnecting.discard(key)
-                    log.debug("[watcher] asr reconnect schedule failed: %s", exc)
-            return False
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                asr.append_audio(pcm), loop)
-            return bool(future.result(timeout=1.0))
-        except FuturesTimeout:
-            log.warning("[watcher] asr_audio delivery timed out key=%s", key)
-            return False
-        except Exception as exc:
-            log.debug("[watcher] asr_audio failed: %s", exc)
-            return False
+        state_lock = getattr(self, "_asr_state_lock", None)
+        if state_lock is None:
+            state_lock = threading.RLock()
+            self._asr_state_lock = state_lock
 
-    async def _asr_reconnect(self, key: str) -> None:
-        """重连一个死掉的上游 ASR 会话 (复用同对象 + 同回调, 重建 WS)。去抖: asr_audio
-        保证同 key 同时只有一个本协程在跑。"""
-        try:
+        accepted = False
+        schedule_drain = False
+        schedule_reconnect = False
+        with state_lock:
+            self._ensure_asr_runtime_state_locked()
             asr = self._asr.get(key)
             if asr is None:
-                return   # 已被 asr_stop 移除 → 放弃重连
+                return False
+            if not getattr(asr, "is_connected", True):
+                if self._asr_reconnecting.get(key) is not asr:
+                    self._asr_reconnecting[key] = asr
+                    schedule_reconnect = True
+            else:
+                pending = self._asr_audio_pending.setdefault(key, deque())
+                if len(pending) >= _ASR_AUDIO_MAX_PENDING_CHUNKS:
+                    pending.popleft()
+                    dropped = self._asr_audio_dropped.get(key, 0) + 1
+                    self._asr_audio_dropped[key] = dropped
+                    if dropped == 1 or dropped % 25 == 0:
+                        log.warning(
+                            "[watcher] ASR audio queue full; dropped oldest "
+                            "chunk key=%s total=%d",
+                            key, dropped,
+                        )
+                pending.append(bytes(pcm))
+                accepted = True
+                if self._asr_audio_draining.get(key) is not asr:
+                    self._asr_audio_draining[key] = asr
+                    schedule_drain = True
+
+        try:
+            if schedule_reconnect:
+                loop.call_soon_threadsafe(
+                    self._start_asr_reconnect_on_loop, key, asr)
+                return False
+            if not accepted:
+                return False
+            if schedule_drain:
+                loop.call_soon_threadsafe(
+                    self._start_asr_audio_drain_on_loop, key, asr)
+            return True
+        except Exception as exc:
+            with state_lock:
+                if self._asr_reconnecting.get(key) is asr:
+                    self._asr_reconnecting.pop(key, None)
+                if self._asr_audio_draining.get(key) is asr:
+                    self._asr_audio_draining.pop(key, None)
+                    self._asr_audio_pending.pop(key, None)
+            log.debug("[watcher] ASR audio schedule failed: %s", exc)
+            return False
+
+    def _start_asr_audio_drain_on_loop(self, key: str, asr: Any) -> None:
+        """Loop callback: start the one drain task owned by ``asr``."""
+        asyncio.create_task(self._drain_asr_audio(key, asr))
+
+    async def _drain_asr_audio(self, key: str, asr: Any) -> None:
+        """Drain one owner's bounded PCM queue in order on the Watcher loop."""
+        state_lock = self._asr_state_lock
+        while True:
+            with state_lock:
+                if self._asr.get(key) is not asr:
+                    if self._asr_audio_draining.get(key) is asr:
+                        self._asr_audio_draining.pop(key, None)
+                    return
+                pending = self._asr_audio_pending.get(key)
+                if not pending:
+                    self._asr_audio_pending.pop(key, None)
+                    if self._asr_audio_draining.get(key) is asr:
+                        self._asr_audio_draining.pop(key, None)
+                    return
+                pcm = pending.popleft()
+            try:
+                delivered = bool(await asr.append_audio(pcm))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.debug("[watcher] ASR audio delivery failed: %s", exc)
+                delivered = False
+            if delivered:
+                continue
+
+            schedule_reconnect = False
+            with state_lock:
+                if self._asr.get(key) is asr:
+                    # Queued chunks predate recovery and should not be replayed
+                    # after reconnect; resume from the next live PCM chunk.
+                    self._asr_audio_pending.pop(key, None)
+                    if self._asr_reconnecting.get(key) is not asr:
+                        self._asr_reconnecting[key] = asr
+                        schedule_reconnect = True
+                if self._asr_audio_draining.get(key) is asr:
+                    self._asr_audio_draining.pop(key, None)
+            if schedule_reconnect:
+                asyncio.create_task(self._asr_reconnect(key, asr))
+            return
+
+    def _start_asr_reconnect_on_loop(self, key: str, asr: Any) -> None:
+        """Loop callback: start the reconnect reserved by ``asr_audio``."""
+        asyncio.create_task(self._asr_reconnect(key, asr))
+
+    async def _asr_reconnect(self, key: str, expected_asr: Any = None) -> None:
+        """Reconnect the exact ASR owner reserved for ``key`` once."""
+        state_lock = getattr(self, "_asr_state_lock", None)
+        if state_lock is None:
+            state_lock = threading.RLock()
+            self._asr_state_lock = state_lock
+        with state_lock:
+            self._ensure_asr_runtime_state_locked()
+            asr = self._asr.get(key)
+            if expected_asr is not None and asr is not expected_asr:
+                return
+            if asr is None:
+                return
+            # Direct/internal callers reserve ownership here; asr_audio already
+            # did so atomically before posting this coroutine.
+            reconnect_owner = self._asr_reconnecting.get(key)
+            if reconnect_owner is None:
+                self._asr_reconnecting[key] = asr
+            elif reconnect_owner is not asr:
+                return
+        try:
             ok = False
             try:
                 ok = await asr.connect()
             except Exception as exc:
                 log.warning("[watcher] asr reconnect error key=%s: %s", key, exc)
-            if ok:
-                # CAS ownership check: asr_stop/replacement may have popped this
-                # exact object while connect() was awaiting the network.  A
-                # late successful connect must not leave an untracked ghost WS
-                # whose callbacks survive the stopped renderer turn.
-                if self._asr.get(key) is not asr:
-                    try:
-                        try:
-                            await asr.close(graceful=False)
-                        except TypeError:
-                            await asr.close()
-                    except Exception:
-                        pass
-                    log.info(
-                        "[watcher] discarded stale ASR reconnect key=%s", key)
-                    return
+            with state_lock:
+                still_owned = self._asr.get(key) is asr
+            if ok and still_owned:
                 log.info("[watcher] asr reconnected key=%s", key)
+            elif ok:
+                # A stop/replacement won the ownership race while connect was
+                # awaiting the network.  Close the late socket before returning.
+                try:
+                    try:
+                        await asr.close(graceful=False)
+                    except TypeError:
+                        await asr.close()
+                except Exception:
+                    pass
+                log.info("[watcher] discarded stale ASR reconnect key=%s", key)
             else:
-                log.warning("[watcher] asr reconnect failed key=%s (will retry on next audio)", key)
+                log.warning(
+                    "[watcher] asr reconnect failed key=%s (will retry on next audio)",
+                    key,
+                )
         finally:
-            self._asr_reconnecting.discard(key)
+            with state_lock:
+                if self._asr_reconnecting.get(key) is asr:
+                    self._asr_reconnecting.pop(key, None)
 
     def asr_stop(
         self,
@@ -1692,10 +1900,15 @@ class WatcherAgent:
             state_lock = threading.RLock()
             self._asr_state_lock = state_lock
         with state_lock:
+            self._ensure_asr_runtime_state_locked()
             if hasattr(self, "_asr_start_tokens"):
                 self._asr_start_tokens.pop(key, None)
             asr = self._asr.pop(key, None)
-        self._asr_reconnecting.discard(key)   # 清在飞重连标记 (会话已停)
+            self._asr_reconnecting.pop(key, None)
+            self._asr_audio_pending.pop(key, None)
+            self._asr_audio_dropped.pop(key, None)
+            if self._asr_audio_draining.get(key) is asr:
+                self._asr_audio_draining.pop(key, None)
         if loop is None or asr is None:
             return {
                 "ok": True,
@@ -1763,28 +1976,56 @@ class WatcherAgent:
         Returns the request_id (``req_<8hex>``), or ``""`` when the engine isn't
         ready or submission failed.
         """
-        if self._loop is None or self.responder is None:
+        stop_flag = getattr(self, "_stop", None)
+        if (self._loop is None or self.responder is None
+                or (stop_flag is not None and stop_flag.is_set())):
             return ""
         import secrets
         rid = (request_id or "").strip() or ("req_" + secrets.token_hex(4))
-        # BUG 7: refuse to start a SECOND delegation for a rid whose run is still
-        # live (e.g. op=enable on an already-running watcher). Two runs share one
-        # _stop_events[rid] + registry entry → duplicate reports/hooks. Return the
-        # existing rid (idempotent) instead of spawning a duplicate.
-        _existing = self._active.get(rid)
-        if _existing is not None and not _existing.done():
-            log.info("[watcher] delegation %s already live; not starting a duplicate", rid)
-            return rid
+        lifecycle_lock = getattr(self, "_delegation_lock", None)
+        if lifecycle_lock is None:
+            # Focused tests may build a minimal engine through ``__new__``.
+            lifecycle_lock = threading.RLock()
+            self._delegation_lock = lifecycle_lock
+        pending = getattr(self, "_delegation_pending", None)
+        if pending is None:
+            pending = set()
+            self._delegation_pending = pending
+
+        # Reserve rid before scheduling. Without this reservation a delete can
+        # arrive after run_coroutine_threadsafe() but before _run_delegation has
+        # registered its asyncio.Event, get a false "inactive" result, and remove
+        # the registry tombstone while the coroutine subsequently starts running.
         try:
-            fut = asyncio.run_coroutine_threadsafe(
-                self._run_delegation(rid, task_instruction),
-                self._loop)
-            self._active[rid] = fut
+            with lifecycle_lock:
+                existing = self._active.get(rid)
+                if rid in pending or (
+                        existing is not None and not existing.done()):
+                    log.info(
+                        "[watcher] delegation %s already live; "
+                        "not starting a duplicate", rid)
+                    return rid
+                pending.add(rid)
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._run_delegation(rid, task_instruction),
+                        self._loop)
+                except Exception:
+                    pending.discard(rid)
+                    raise
+                self._active[rid] = fut
 
             # Surface exceptions that would otherwise vanish into the Future,
             # and drop the tracking entry when done.
             def _done(f, _rid=rid):
-                self._active.pop(_rid, None)
+                with lifecycle_lock:
+                    # CAS cleanup: never let an old Future remove a newer run
+                    # reusing the same request id.
+                    if self._active.get(_rid) is f:
+                        self._active.pop(_rid, None)
+                        pending.discard(_rid)
+                        self._stop_events.pop(_rid, None)
+                        getattr(self, "_stop_reasons", {}).pop(_rid, None)
                 try:
                     exc = f.exception()
                 except Exception:
@@ -2545,34 +2786,72 @@ class WatcherAgent:
     # ------------------------------------------------------------------ #
     def recall_memory(self, brief: str, user_text: str = "",
                       timeout: Optional[float] = None) -> Dict[str, Any]:
-        """Run one bounded QueryWorker recall job.
+        """Run one bounded legacy synchronous recall job.
 
         At most ``query_worker_max_concurrency`` jobs execute concurrently and
         only ``query_worker_max_pending`` additional callers may wait. This
-        protects the backend loop without changing the main-agent tool contract.
+        compatibility API is called from non-loop threads; model-visible
+        ``query_multimodal`` uses ``submit_query_async`` instead.
         """
         started = time.monotonic()
+        loop = self._loop
+        semaphore = self._query_semaphore
+        if loop is None or loop.is_closed() or semaphore is None:
+            return {"ok": False, "error": "engine not ready (recall unavailable)"}
+        if self._thread is threading.current_thread():
+            return {
+                "ok": False,
+                "error": "synchronous recall cannot run on the Watcher event-loop thread",
+            }
+
+        recall_id = "recall_" + uuid.uuid4().hex[:12]
         with self._query_lock:
-            admitted = self._query_running + self._query_pending
+            admitted = len(self._query_running) + len(self._query_pending)
             cap = self._query_max_concurrency + self._query_max_pending
             if admitted >= cap:
                 log.warning(
                     "[query-worker] queue full running=%d pending=%d cap=%d+%d",
-                    self._query_running, self._query_pending,
+                    len(self._query_running), len(self._query_pending),
                     self._query_max_concurrency, self._query_max_pending)
                 return {
                     "ok": False,
                     "error": "memory query queue is full",
                     "queue_full": True,
                 }
-            self._query_pending += 1
+            self._query_pending.add(recall_id)
 
         wait_timeout = None if timeout is None else max(0.0, float(timeout))
-        acquired = self._query_semaphore.acquire(timeout=wait_timeout)
+        acquire_future = asyncio.run_coroutine_threadsafe(
+            semaphore.acquire(), loop)
+        try:
+            acquired = bool(acquire_future.result(timeout=wait_timeout))
+        except FuturesTimeout:
+            # If the coroutine completed in the narrow timeout/cancel race, it
+            # owns a slot and must release it on the semaphore's loop.
+            cancelled = acquire_future.cancel()
+            if not cancelled and acquire_future.done():
+                try:
+                    if acquire_future.result(timeout=0):
+                        loop.call_soon_threadsafe(semaphore.release)
+                except Exception:
+                    pass
+            with self._query_lock:
+                self._query_pending.discard(recall_id)
+            return {
+                "ok": False,
+                "error": "memory query timed out while waiting for a worker",
+                "timed_out": True,
+            }
+        except Exception as exc:
+            acquire_future.cancel()
+            with self._query_lock:
+                self._query_pending.discard(recall_id)
+            return {"ok": False, "error": f"memory query admission failed: {exc}"}
+
         with self._query_lock:
-            self._query_pending = max(0, self._query_pending - 1)
+            self._query_pending.discard(recall_id)
             if acquired:
-                self._query_running += 1
+                self._query_running.add(recall_id)
         if not acquired:
             return {
                 "ok": False,
@@ -2588,8 +2867,11 @@ class WatcherAgent:
                 brief, user_text=user_text, timeout=remaining)
         finally:
             with self._query_lock:
-                self._query_running = max(0, self._query_running - 1)
-            self._query_semaphore.release()
+                self._query_running.discard(recall_id)
+            try:
+                loop.call_soon_threadsafe(semaphore.release)
+            except Exception:
+                pass
 
     def _recall_memory_unbounded(self, brief: str, user_text: str = "",
                                  timeout: Optional[float] = None) -> Dict[str, Any]:
@@ -2727,30 +3009,8 @@ class WatcherAgent:
         #   场景)兜底, 再兜底 medium。四档: 200s/100 · 60s/60 · 30s/40 · 10s/15。
         def _round_pacing(reg) -> tuple:
             """Return (ttl_sec, target_frames) for this round."""
-            def _clamp(ttl, tf):
-                # Defensive floor: a bad config / registry value must never make
-                # the round gate 0 (→ ttl=0 busy-spin / target=0 empty batches).
-                # Tiny positive floor (not a product min) so tests can use 0.1s.
-                return max(0.05, float(ttl)), max(1, int(tf))
-            # 1) explicit ttl from set_live_watcher (stored on the registry entry)
-            if isinstance(reg, dict) and reg.get("ttl_sec") and reg.get("target_frames"):
-                return _clamp(reg["ttl_sec"], reg["target_frames"])
-            # 2) auto-detected current scene on the FrameBuffer
-            try:
-                scene = self.frame_buffer.current_scene
-                if isinstance(scene, dict) and scene.get("ttl_sec") and scene.get("target_frames"):
-                    return _clamp(scene["ttl_sec"], scene["target_frames"])
-            except Exception:
-                pass
-            # 3) explicit cfg override (tests / advanced tuning): a bare
-            #    watch_min_batch (+ optional watch_round_ttl_sec) sets the gate
-            #    without a scene. Production always has (1) or (2).
-            _mb = getattr(self.cfg, "watch_min_batch", None)
-            if _mb:
-                _ttl = float(getattr(self.cfg, "watch_round_ttl_sec", 120.0) or 120.0)
-                return _clamp(_ttl, _mb)
-            # 4) medium default
-            return 120.0, 64
+            return _resolve_watch_round_pacing(
+                self.cfg, self.frame_buffer, reg)
 
         # Ensure the analyse file exists (set_live_watcher normally creates
         # it first, but be defensive so the log is never lost).
@@ -2759,14 +3019,26 @@ class WatcherAgent:
         except Exception as _exc:
             log.warning("[watcher] init watch file failed (%s): %s", rid, _exc)
 
-        # Register a stop event so stop_delegation() can end a run early.
+        # Register the loop-owned stop event and inherit any reason tombstone
+        # recorded while this delegation was still in the pending window.
         stop_ev = asyncio.Event()
-        self._stop_events[rid] = stop_ev
+        lifecycle_lock = getattr(self, "_delegation_lock", None)
+        if lifecycle_lock is None:
+            lifecycle_lock = threading.RLock()
+            self._delegation_lock = lifecycle_lock
+        pending = getattr(self, "_delegation_pending", None)
+        if pending is None:
+            pending = set()
+            self._delegation_pending = pending
         stop_reasons = getattr(self, "_stop_reasons", None)
         if stop_reasons is None:
             stop_reasons = {}
             self._stop_reasons = stop_reasons
-        stop_reasons.pop(rid, None)
+        with lifecycle_lock:
+            self._stop_events[rid] = stop_ev
+            pending.discard(rid)
+            if stop_reasons.get(rid) in {"disabled", "deleted"}:
+                stop_ev.set()
 
         # Some focused tests construct a minimal WatcherAgent via ``__new__``.
         # Keep the lifecycle fields defensive without weakening the production
@@ -3154,9 +3426,9 @@ class WatcherAgent:
         #   Frame-enough runs move past waiting immediately.
         if emit is not None:
             try:
-                # Initial target from the current scene's pacing (registry not yet
-                # readable on the engine thread here → scene/default).
-                _ttl0, _need0 = _round_pacing(None)
+                # The task is registered before submission, so auto mode can use
+                # its medium snapshot until the first scene probe lands.
+                _ttl0, _need0 = _round_pacing(_reg0)
                 _have0 = len(_gather(None))
                 if _have0 >= _need0:
                     emit("multimodal.bg", {
@@ -3558,6 +3830,23 @@ class WatcherAgent:
                     _emitted_wait = False
                     while (len(fresh) < target_frames and _elapsed() < ttl_sec
                            and not _ended()):
+                        # SceneDhash normally publishes its first classification
+                        # a few seconds after task creation.  Refresh auto pacing
+                        # inside this wait so the first round can immediately
+                        # change from its medium snapshot to live/fast/slow.
+                        if (isinstance(_reg, dict)
+                                and _reg.get("pacing_mode") == "auto"):
+                            next_ttl, next_target = _round_pacing(_reg)
+                            if ((next_ttl, next_target)
+                                    != (ttl_sec, target_frames)):
+                                ttl_sec, target_frames = next_ttl, next_target
+                                fresh = (
+                                    self.frame_buffer.latest(target_frames)
+                                    if _is_first else _gather(cursor_ts)
+                                )
+                                if (len(fresh) >= target_frames
+                                        or _elapsed() >= ttl_sec):
+                                    continue
                         static_remaining = _static_tail_remaining(
                             fresh, cursor=cursor_ts)
                         if static_remaining is not None and static_remaining <= 0:
@@ -4227,8 +4516,11 @@ class WatcherAgent:
                         _cb_exc,
                     )
         finally:
-            self._stop_events.pop(rid, None)
-            getattr(self, "_stop_reasons", {}).pop(rid, None)
+            with lifecycle_lock:
+                if self._stop_events.get(rid) is stop_ev:
+                    self._stop_events.pop(rid, None)
+                stop_reasons.pop(rid, None)
+                pending.discard(rid)
             # ★ Terminal signal so the right-column deep-research sub-window closes
             #   / collapses once the whole delegation is finished. Without this the
             #   window stays "active" forever: ridIsActive() keeps returning true
@@ -4249,29 +4541,45 @@ class WatcherAgent:
         current round. Called from the gateway RPC thread (multimodal.
         stop_analysis). Returns True if a run was still active for this rid.
 
-        Runs the check-and-set on the engine loop so it can't race the run's own
-        teardown."""
+        Admission and the reason tombstone are synchronized with submission;
+        once the loop-owned Event exists, setting it is dispatched on the engine
+        loop so it cannot race the run's own teardown."""
         loop = self._loop
         if loop is None:
             return False
-        if self._stop_events.get(request_id) is None:
-            return False
-
         normalized_reason = str(reason or "disabled").strip().lower()
         if normalized_reason not in {"disabled", "deleted"}:
             normalized_reason = "disabled"
 
-        async def _set() -> bool:
+        lifecycle_lock = getattr(self, "_delegation_lock", None)
+        if lifecycle_lock is None:
+            lifecycle_lock = threading.RLock()
+            self._delegation_lock = lifecycle_lock
+        pending = getattr(self, "_delegation_pending", None)
+        if pending is None:
+            pending = set()
+            self._delegation_pending = pending
+        reasons = getattr(self, "_stop_reasons", None)
+        if reasons is None:
+            reasons = {}
+            self._stop_reasons = reasons
+        with lifecycle_lock:
             ev = self._stop_events.get(request_id)
-            if ev is None:
+            is_pending = request_id in pending
+            if ev is None and not is_pending:
                 return False
-            reasons = getattr(self, "_stop_reasons", None)
-            if reasons is None:
-                reasons = {}
-                self._stop_reasons = reasons
+            # Record the reason synchronously. If the coroutine has not started,
+            # _run_delegation will consume this tombstone when it creates ev.
             reasons[request_id] = normalized_reason
-            ev.set()
-            return True
+
+        async def _set() -> bool:
+            with lifecycle_lock:
+                current_ev = self._stop_events.get(request_id)
+                if current_ev is None:
+                    # Still pending: the synchronously stored tombstone is enough.
+                    return request_id in pending
+                current_ev.set()
+                return True
         # 立即把日志文件头部标 stopping, 让 get_live_watcher 马上看到"正在停止"。
         try:
             from . import watch_file as _df
@@ -4279,6 +4587,11 @@ class WatcherAgent:
                 request_id, "stopping", stop_reason=normalized_reason)
         except Exception:
             pass
+        if ev is None:
+            # The Future is admitted but its coroutine has not had its first loop
+            # turn yet. Do not wait on this same loop (callers may be on it); the
+            # reason tombstone above makes the eventual first turn self-stop.
+            return True
         try:
             fut = asyncio.run_coroutine_threadsafe(_set(), loop)
             return bool(fut.result(timeout=5.0))

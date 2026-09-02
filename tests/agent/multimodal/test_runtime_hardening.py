@@ -173,13 +173,6 @@ def test_memory_backend_publishes_ready_and_stops_cleanly():
 
 
 def test_query_admission_limits_running_and_pending_work():
-    engine = WatcherAgent.__new__(WatcherAgent)
-    engine._query_lock = threading.RLock()
-    engine._query_max_concurrency = 1
-    engine._query_max_pending = 1
-    engine._query_running = 0
-    engine._query_pending = 0
-    engine._query_semaphore = threading.BoundedSemaphore(1)
     release = threading.Event()
     started = threading.Event()
 
@@ -188,27 +181,55 @@ def test_query_admission_limits_running_and_pending_work():
         assert release.wait(2.0)
         return {"ok": True}
 
-    engine._recall_memory_unbounded = recall
-    results = []
-    first = threading.Thread(
-        target=lambda: results.append(engine.recall_memory("first", timeout=2.0)))
-    second = threading.Thread(
-        target=lambda: results.append(engine.recall_memory("second", timeout=2.0)))
-    first.start()
-    assert started.wait(1.0)
-    second.start()
+    # Use the production object shape: __init__ owns set-based query state and
+    # the semaphore is created on the Watcher event loop.  The previous test
+    # injected integer counters + threading.BoundedSemaphore and therefore
+    # validated an object that can never exist in production.
+    with _LoopThread() as watcher_runtime:
+        engine = WatcherAgent(object())
+        engine._loop = watcher_runtime.loop
+        engine._thread = watcher_runtime.thread
+        engine._query_max_concurrency = 1
+        engine._query_max_pending = 1
 
-    deadline = time.time() + 1.0
-    while engine._query_pending != 1 and time.time() < deadline:
-        time.sleep(0.01)
-    rejected = engine.recall_memory("third", timeout=0.1)
-    assert rejected["queue_full"] is True
+        async def _make_semaphore():
+            return asyncio.Semaphore(1)
 
-    release.set()
-    first.join(2.0)
-    second.join(2.0)
-    assert not first.is_alive() and not second.is_alive()
-    assert len(results) == 2 and all(item["ok"] for item in results)
+        engine._query_semaphore = asyncio.run_coroutine_threadsafe(
+            _make_semaphore(), watcher_runtime.loop).result(timeout=1.0)
+        engine._recall_memory_unbounded = recall
+        assert isinstance(engine._query_running, set)
+        assert isinstance(engine._query_pending, set)
+        assert isinstance(engine._query_semaphore, asyncio.Semaphore)
+
+        results = []
+        first = threading.Thread(
+            target=lambda: results.append(
+                engine.recall_memory("first", timeout=2.0)))
+        second = threading.Thread(
+            target=lambda: results.append(
+                engine.recall_memory("second", timeout=2.0)))
+        first.start()
+        assert started.wait(1.0)
+        second.start()
+
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            with engine._query_lock:
+                if len(engine._query_pending) == 1:
+                    break
+            time.sleep(0.01)
+        rejected = engine.recall_memory("third", timeout=0.1)
+        assert rejected["queue_full"] is True
+
+        release.set()
+        first.join(2.0)
+        second.join(2.0)
+        assert not first.is_alive() and not second.is_alive()
+        assert len(results) == 2 and all(item["ok"] for item in results)
+        with engine._query_lock:
+            assert engine._query_running == set()
+            assert engine._query_pending == set()
 
 
 def test_audio_diagnostics_detect_headers_silence_and_time_mapping():

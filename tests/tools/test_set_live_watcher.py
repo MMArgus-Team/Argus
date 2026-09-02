@@ -106,6 +106,64 @@ class TestSetWatcherLifecycle(unittest.TestCase):
         self.assertEqual(ent["ttl"], "1min")
         self.assertEqual(ent["ttl_sec"], 60)
         self.assertEqual(ent["target_frames"], 60)
+        self.assertEqual(ent["pacing_mode"], "explicit")
+
+        # Explicit user pacing remains authoritative after scene detection.
+        from agent.multimodal.watcher_engine import _resolve_watch_round_pacing
+        engine.frame_buffer.current_scene = {
+            "pace": "live", "ttl_sec": 10, "target_frames": 15,
+        }
+        self.assertEqual(
+            _resolve_watch_round_pacing(
+                types.SimpleNamespace(
+                    watch_min_batch=64, watch_round_ttl_sec=120),
+                engine.frame_buffer,
+                ent,
+            ),
+            (60.0, 60),
+        )
+
+    def test_auto_pacing_follows_scene_detected_after_create(self):
+        agent = _agent()
+        engine = self._mock_engine()
+        # No scene exists when the task is created, so the UI snapshot is the
+        # medium tier.  It must remain marked auto rather than becoming a frozen
+        # explicit 60s/60-frame override.
+        with patch("tui_gateway.server._sessions", self._sessions(engine, agent)):
+            raw = set_live_watcher(
+                task_instruction="实时观察操作", session_id="sess1")
+        data = json.loads(raw)
+        ent = agent.mm_watchers[data["request_id"]]
+        self.assertEqual(ent["pacing_mode"], "auto")
+        self.assertEqual((ent["ttl_sec"], ent["target_frames"]), (60, 60))
+        from agent.multimodal import watch_file
+        self.assertEqual(
+            watch_file.read_state(data["request_id"])["pacing_mode"],
+            "auto",
+        )
+
+        from agent.multimodal.watcher_engine import _resolve_watch_round_pacing
+        self.assertEqual(
+            _resolve_watch_round_pacing(
+                types.SimpleNamespace(
+                    watch_min_batch=64, watch_round_ttl_sec=120),
+                types.SimpleNamespace(current_scene=None),
+                ent,
+            ),
+            (60.0, 60),
+        )
+        frame_buffer = types.SimpleNamespace(current_scene={
+            "pace": "live", "ttl_sec": 10, "target_frames": 15,
+        })
+        self.assertEqual(
+            _resolve_watch_round_pacing(
+                types.SimpleNamespace(
+                    watch_min_batch=64, watch_round_ttl_sec=120),
+                frame_buffer,
+                ent,
+            ),
+            (10.0, 15),
+        )
 
     def test_create_ttl_defaults_from_current_scene(self):
         from agent.multimodal._memory import FrameBuffer
@@ -124,6 +182,7 @@ class TestSetWatcherLifecycle(unittest.TestCase):
             raw = set_live_watcher(task_instruction="记会议纪要", session_id="sess1")
         data = json.loads(raw)
         ent = agent.mm_watchers[data["request_id"]]
+        self.assertEqual(ent["pacing_mode"], "auto")
         self.assertEqual(ent["ttl_sec"], 360)
         self.assertEqual(ent["target_frames"], 150)
 

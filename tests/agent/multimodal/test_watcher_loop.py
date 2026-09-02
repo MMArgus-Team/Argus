@@ -447,6 +447,65 @@ def test_update_changes_brief_next_round():
 # TTL gate: when target_frames is NOT reached but the ttl elapses, the round
 # runs on the frames it has (doesn't hang waiting for the full target).
 # --------------------------------------------------------------------------- #
+def test_auto_pacing_refreshes_during_first_round_wait():
+    cfg = _batch_cfg(
+        watch_min_batch=64,
+        watch_round_ttl_sec=120.0,
+        watch_static_tail_flush_sec=999.0,
+    )
+    fb = FrameBuffer(SimpleNamespace(buffer_seconds=60, buffer_capture_fps=2))
+    for i in range(4):
+        fb.push(Frame(ts=float(i), jpeg_b64=_gradient_b64(i * 7)))
+
+    registry = {
+        "pacing_mode": "auto",
+        # Create-time medium snapshot; the engine must stop treating this as an
+        # explicit override once SceneDhash publishes a live classification.
+        "ttl_sec": 60,
+        "target_frames": 60,
+    }
+    responder = _FakeResponder(texts=["实时段", ""])
+    events = []
+    eng = _make_engine(
+        fb,
+        responder=responder,
+        cfg=cfg,
+        emit_cb=lambda ev, payload: events.append((ev, payload)),
+        on_complete=lambda *_args: None,
+        registry_cb=lambda _rid: registry,
+    )
+
+    switched = {"done": False}
+
+    def _switch_scene_and_stop(ev, payload):
+        events.append((ev, payload))
+        if (not switched["done"] and ev == "multimodal.bg"
+                and payload.get("type") == "waiting"):
+            switched["done"] = True
+            fb.set_current_scene({
+                "pace": "live", "ttl_sec": 0.05, "target_frames": 2,
+            })
+        if responder.calls >= 1:
+            eng._source_stopped = True
+
+    eng._emit_cb = _switch_scene_and_stop
+    _run(eng._run_delegation("rid-auto-pace", task_instruction="盯实时操作"))
+
+    assert switched["done"] is True
+    assert responder.calls >= 1
+    waits = [
+        payload for ev, payload in events
+        if ev == "multimodal.bg" and payload.get("type") == "waiting"
+    ]
+    # Initial UI feedback uses the medium snapshot (not the stale 120/64 cfg),
+    # then the real first round observes the newly published live scene and
+    # runs immediately with at most its two-frame target.
+    assert waits[0]["need"] == 60
+    assert waits[0]["ttl_sec"] == 60.0
+    assert all(payload.get("need") != 64 for payload in waits)
+    assert len(responder.frame_batches[0]) <= 2
+
+
 def test_ttl_elapse_runs_on_partial_frames():
     cfg = _batch_cfg(
         watch_min_batch=64,          # target 64 frames…

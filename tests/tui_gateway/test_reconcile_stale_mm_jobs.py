@@ -166,6 +166,7 @@ def test_disk_only_watcher_restores_structured_state(monkeypatch, tmp_path):
         hook_instruction="输出最终纪要",
         state={
             "label": "会议复盘",
+            "pacing_mode": "auto",
             "ttl": "30s",
             "ttl_sec": 30,
             "target_frames": 40,
@@ -186,6 +187,7 @@ def test_disk_only_watcher_restores_structured_state(monkeypatch, tmp_path):
     assert restored["status"] == "interrupted"
     assert restored["task_instruction"] == "持续总结会议"
     assert restored["label"] == "会议复盘"
+    assert restored["pacing_mode"] == "auto"
     assert restored["ttl"] == "30s"
     assert restored["ttl_sec"] == 30
     assert restored["target_frames"] == 40

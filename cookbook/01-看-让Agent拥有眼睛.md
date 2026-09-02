@@ -129,7 +129,7 @@ QueryWorker 是 VLM-first 的一次性回答者：
 
 答案由 QueryWorker 直接回写原用户消息的 answer slot，不再回到主 Agent 进行第二次改写。这既避免了多一次模型延时，也避免图像与中间证据撑大主对话上下文。
 
-`get_current_frame` 是更窄的显式原始帧入口：只在用户明确要求“把最新帧取回/展示给我”，或需要做原始帧诊断时使用。它**不是**“现在画面里是什么”这类普通视觉问答的默认入口。
+取回、展示、检查或描述当前/历史帧同样走 `query_multimodal`。底层原始帧读取函数只作内部兼容，不再作为主 Agent 工具出现。
 
 > **旧架构说明：** 早期版本曾在每轮对话前用 `vision_inject_to_main` / `_maybe_apply_multimodal_vision()` 向主 Agent 被动附加尾部帧。这会让纯文本问题也支付图像 prefill，并且容易把“当前画面”与“历史证据”混为一谈。旧文档、旧注释或历史记录中若仍出现“主 Agent 当下一瞥”，它描述的是这个已退出的设计，不是现行合同。
 
@@ -146,10 +146,7 @@ QueryWorker 是 VLM-first 的一次性回答者：
 - **数据层**：QueryWorker 取固定 `ask_ts` 的近期快照，必要时补历史关键帧；Watcher 持有持续游标，逐批消费后续流。
 - **决策层**：稳定系统提示 `MM_LIVE_GUIDANCE`（[agent/prompt_builder.py:163](agent/prompt_builder.py)）要求主 Agent 根据用户完整语义路由，不依赖“当前/刚才/监控”等单个关键词硬分支。
 
-另外还有两个边界清楚的入口：
-
-- **“把最新原始帧给我 / 检查采集到的图”** → `get_current_frame`；
-- **“等某个事件出现就提醒我”** → `set_monitor`，由 Monitor 持续盯事件，而不是 Watcher 累积报告。
+另一个边界清楚的入口是：**“等某个事件出现就提醒我”** → `set_monitor`，由 Monitor 持续盯事件，而不是 Watcher 累积报告。
 
 ## 1.7 watcher 逐段深研：TTL + 帧数双门
 
@@ -220,7 +217,7 @@ Argus 的解法是 **TTL + 帧数双门**（[agent/multimodal/watcher_engine.py:
 - dHash 在入口去重，公共决策只做一次；
 - 场景感知让去重阈值和攒帧节奏随内容呼吸；
 - 主 Agent 不被动收帧；一次性当前/历史/mixed 视觉问题由 `query_multimodal` 交给 QueryWorker；
-- `get_current_frame` 只负责显式原始最新帧，持续逐段研究则交给 watcher；
+- 取回/检查当前或历史帧也统一走 `query_multimodal`，持续逐段研究则交给 watcher；
 - watcher 用 TTL + 帧数双门，随场景节奏逐段深研整条流；
 - 窗口文字桥优先用 AX/UIA 抓结构化正文，回退到 OCR reflow 增强管线；
 - 追踪从重型 DINO+Kalman 简化到 EMA+线性运动，在 2fps 约束下找到性价比甜区。

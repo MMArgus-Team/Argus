@@ -4,9 +4,10 @@
 
 # Argus
 
-Argus is a real-time multimodal AI agent that can watch a shared screen or
-camera, listen to user and environment audio, answer questions about recent
-frames, recall earlier events, and run long-lived monitors or research tasks.
+Argus is a multimodal AI assistant that can "watch and chat": the main Agent handles user text and semantic routing and **does not passively receive the live video feed**; one-shot visual questions and ongoing video tasks are delegated to dedicated workers. Two user-facing multimodal modes:
+
+- **One-shot visual Q&A** — Present, historical, or mixed "on-screen entity + external facts" questions all go through `query_multimodal`. QueryWorker reads recent frames at question time, then answers directly, recalls historical memory, or searches external sources as needed.
+- **Continuous monitoring / deep research** — Two background Agents: `set_monitor` (wait for an event → alert) and `set_live_watcher` (background segment-by-segment deep research, producing progress and a final report). Watcher has one mode only: start from the most recent segment, analyze round-by-round under TTL + frame-count dual gates until the stream stops or the user stops it (no qa/analysis/research taxonomy).
 
 [简体中文](README.zh-CN.md) · [Español](README.es.md) · [اردو](README.ur-pk.md)
 
