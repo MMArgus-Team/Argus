@@ -135,21 +135,21 @@ def test_prompt_uses_relevant_prior_qa_in_a_self_contained_handoff():
         assert contract in query_help
 
 
-def test_prompt_routes_known_historical_image_retrieval_directly_to_frame_tool():
-    assert (
-        "explicit request to display or retrieve the real historical image of an "
-        "already-known item" in MM_LIVE_GUIDANCE
+def test_prompt_routes_current_and_historical_frame_retrieval_to_query_worker():
+    assert "displaying, retrieving, or inspecting current or historical frames" in (
+        MM_LIVE_GUIDANCE
     )
-    assert "call show_memory_frame directly as specified below" in MM_LIVE_GUIDANCE
-    assert (
-        "If the user already names the item and asks to see it, call "
-        "show_memory_frame directly" in MM_LIVE_GUIDANCE
+    assert "any request to display, replay, retrieve, inspect, or describe" in (
+        MM_LIVE_GUIDANCE
     )
+    assert "goes through query_multimodal" in MM_LIVE_GUIDANCE
+    assert "get_current_frame" not in MM_LIVE_GUIDANCE
+    assert "show_memory_frame" not in MM_LIVE_GUIDANCE
 
 
-def test_prompt_keeps_raw_frame_monitor_and_watcher_responsibilities_distinct():
-    assert "Use get_current_frame only when the user explicitly asks" in MM_LIVE_GUIDANCE
-    assert "Do not use it as the normal one-shot visual-QA path" in MM_LIVE_GUIDANCE
+def test_prompt_keeps_one_shot_monitor_and_watcher_responsibilities_distinct():
+    assert "current or historical frames" in MM_LIVE_GUIDANCE
+    assert "goes through query_multimodal" in MM_LIVE_GUIDANCE
     assert "To watch until a future condition is triggered, call set_monitor" in (
         MM_LIVE_GUIDANCE
     )
@@ -210,6 +210,8 @@ def test_request_builder_never_keyword_forces_multimodal_tool(
     schemas = _tool_schemas_by_name(kwargs)
     assert "query_multimodal" in schemas, case
     assert "recall_multimodal_memory" not in schemas, case
+    assert "get_current_frame" not in schemas, case
+    assert "show_memory_frame" not in schemas, case
 
 
 def test_query_multimodal_is_available_as_an_unpinned_semantic_choice(
@@ -248,7 +250,7 @@ def test_real_system_prompt_publishes_one_stable_query_contract(
     assert "recall_multimodal_memory" not in first
 
 
-def test_registered_schemas_keep_raw_query_monitor_and_watcher_roles_distinct(
+def test_registered_schemas_expose_only_unified_query_monitor_and_watcher_roles(
     multimodal_routing_agent,
 ):
     kwargs = multimodal_routing_agent._build_api_kwargs([
@@ -256,18 +258,15 @@ def test_registered_schemas_keep_raw_query_monitor_and_watcher_roles_distinct(
     ])
     schemas = _tool_schemas_by_name(kwargs)
 
-    raw_frame = schemas["get_current_frame"]["description"]
     one_shot = schemas["query_multimodal"]["description"]
-    historical_frame = schemas["show_memory_frame"]["description"]
     monitor = schemas["set_monitor"]["description"]
     watcher = schemas["set_live_watcher"]["description"]
 
-    assert "raw current frames" in raw_frame
-    assert "call query_multimodal instead" in raw_frame
+    assert "get_current_frame" not in schemas
+    assert "show_memory_frame" not in schemas
     assert "one-shot question" in one_shot
+    assert "current or historical live frames belong here" in one_shot
     assert "future trigger" in one_shot
-    assert "real historical key-frame images" in historical_frame
-    assert "already know the exact item name, call this tool directly" in historical_frame
     assert "per-event alert" in monitor
     assert "summary/report/analysis" in monitor
     assert "continuously" in watcher
@@ -280,16 +279,15 @@ def test_stored_media_and_computer_schemas_defer_live_visual_qa_to_query_worker(
     computer = COMPUTER_USE_SCHEMA["description"]
 
     for description in (vision, video):
-        assert "raw/latest current frames" in description
-        assert "use get_current_frame" in description
-        assert "ordinary one-shot question" in description
-        assert "current or past live stream" in description
+        assert "one-shot request" in description
+        assert "current or historical live frames" in description
         assert "use query_multimodal" in description
+        assert "get_current_frame" not in description
 
-    assert "ordinary visual question about the current or past live screen" in computer
+    assert "non-interactive visual request about the current or past live screen" in computer
     assert "use query_multimodal" in computer
-    assert "raw/latest capture" in computer
-    assert "use get_current_frame" in computer
+    assert "including showing or inspecting a frame" in computer
+    assert "get_current_frame" not in computer
     assert "Reserve computer_use for desktop INTERACTION" in computer
 
 

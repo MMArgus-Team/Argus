@@ -878,7 +878,7 @@ _DEEP_PATH_PREFIX = {
 # the dataclass name doesn't follow prefix_leaf. Value None drops the key.
 _DEEP_PATH_EXACT = {
     # (settings.vision.inject_* removed in v33 — passive frame injection deleted;
-    #  main agent uses the get_current_frame tool instead.)
+    #  one-shot visual requests use query_multimodal instead.)
     "settings.framebuffer": {
         "seconds": "buffer_seconds",
         "capture_fps": "buffer_capture_fps",

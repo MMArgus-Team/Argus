@@ -197,12 +197,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # conversation, so this keeps the cached system prefix stable while avoiding
     # instructions to call monitor/frame tools in coding-only postures.
     _mm_live_tools = {
-        "get_current_frame",
         "check_video_stream",
         "set_monitor",
         "set_live_watcher",
         "query_multimodal",
-        "show_memory_frame",
     }
     if _mm_live_tools.intersection(agent.valid_tool_names):
         tool_guidance.append(MM_LIVE_GUIDANCE)

@@ -2057,10 +2057,9 @@ DEFAULT_CONFIG = {
         # monitor endpoint to model.monitor.*, and the memory writer/reviewer +
         # recall endpoints to model.memory.* (+ model.memory.recall.*).
         # ★ v33: NO passive frame injection. The main agent is never auto-fed
-        # live frames — it must call the get_current_frame tool to look at the
-        # current picture (which handles supports_vision=false via auxiliary.vision
-        # VQA). The old vision_inject_*/vision_stream_max_age_sec/vision_route_hint
-        # knobs were removed with the passive-injection path.
+        # live frames; one-shot current/history visual requests go through
+        # query_multimodal. The old vision_inject_*/vision_stream_max_age_sec/
+        # vision_route_hint knobs were removed with the passive-injection path.
         # Phase-3 proactive video monitor (the agent watches the live stream and
         # speaks up unprompted when a user-requested condition appears). The
         # subsystem is ALWAYS ON (v33: the global monitor_enabled master switch

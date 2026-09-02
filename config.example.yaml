@@ -238,8 +238,9 @@ auxiliary:
 # ═══════════════════════════════════════════════════════════════════════
 settings:
   enabled: true
-  # 主 agent 不被动注入帧; 视觉问答统一走 query_multimodal → QueryWorker。
-  # get_current_frame 只用于用户明确要求取回/展示最新原始帧。记忆常开 (无开关)。
+  # 主 agent 【永不】被动注入帧。一次性 current/history/mixed 视觉问答
+  # 统一走 query_multimodal → QueryWorker（提问时刻帧 + 按需 Recall/Search）。
+  # 原始帧读取函数仅供内部兼容，不作为主 agent 工具暴露。记忆常开 (无开关)。
 
   framebuffer:                     # 共享采集环 + 入口 dHash 去重
     seconds: 1800.0                # 30min 2fps 全保留 (~280MB @720p)

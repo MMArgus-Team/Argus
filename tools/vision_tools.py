@@ -1178,10 +1178,9 @@ VISION_ANALYZE_SCHEMA = {
         "falls back to an auxiliary vision model that returns a text description.\n"
         "★ Do NOT use this to look at the LIVE screen share / camera / video "
         "stream. This tool only accepts a real image path/URL and will error on "
-        "live-stream requests. If the user explicitly asks to retrieve, show, or "
-        "inspect the raw/latest current frames, use get_current_frame. For an "
-        "ordinary one-shot question grounded in the current or past live stream, "
-        "use query_multimodal. For continuous stream analysis or deep "
+        "live-stream requests. For any one-shot request to inspect, retrieve, show, "
+        "or reason about current or historical live frames, use query_multimodal. "
+        "For continuous stream analysis or deep "
         "research/report work, use set_live_watcher."
     ),
     "parameters": {
@@ -1556,9 +1555,8 @@ VIDEO_ANALYZE_SCHEMA = {
         "Supports mp4, webm, mov, avi, mkv, mpeg formats. "
         "Note: large videos (>20 MB) may be slow; max ~50 MB.\n"
         "★ Do NOT use this for the LIVE screen share / camera / video stream. "
-        "If the user explicitly asks to retrieve, show, or inspect the raw/latest "
-        "current frames, use get_current_frame. For an ordinary one-shot question "
-        "grounded in the current or past live stream, use query_multimodal. For "
+        "For any one-shot request to inspect, retrieve, show, or reason about "
+        "current or historical live frames, use query_multimodal. For "
         "continuous stream analysis / research / report use set_live_watcher; for "
         "event monitoring use set_monitor."
     ),
