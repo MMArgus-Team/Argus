@@ -375,19 +375,100 @@ async def test_late_reconnect_success_is_closed_after_stop_pops_owner():
             return {"ok": True}
 
     asr = _ReconnectASR()
-    watcher = object.__new__(WatcherAgent)
+    watcher = WatcherAgent(object())
     watcher._asr = {"turn": asr}
-    watcher._asr_reconnecting = {"turn"}
+    watcher._asr_reconnecting = {"turn": asr}
 
     reconnect = asyncio.create_task(watcher._asr_reconnect("turn"))
     await entered.wait()
-    watcher._asr.pop("turn")  # asr_stop linearization point
+    with watcher._asr_state_lock:
+        watcher._asr.pop("turn")  # asr_stop linearization point
+        watcher._asr_reconnecting.pop("turn", None)
     release.set()
     await reconnect
 
     assert asr.closed == [False]
     assert "turn" not in watcher._asr
     assert "turn" not in watcher._asr_reconnecting
+
+
+@pytest.mark.asyncio
+async def test_asr_audio_admission_is_nonblocking_and_drains_on_owner_loop():
+    scheduled = []
+    delivered = []
+    drained = asyncio.Event()
+
+    class _LoopProxy:
+        def is_closed(self):
+            return False
+
+        def call_soon_threadsafe(self, callback, *args):
+            scheduled.append((callback, args))
+
+    class _ASR:
+        is_connected = True
+
+        async def append_audio(self, pcm):
+            delivered.append(pcm)
+            drained.set()
+            return True
+
+    watcher = WatcherAgent(object())
+    watcher._loop = _LoopProxy()
+    asr = _ASR()
+    with watcher._asr_state_lock:
+        watcher._asr["turn"] = asr
+
+    assert watcher.asr_audio("turn", b"pcm") is True
+    # Admission only reserved bounded queue state.  No coroutine or socket send
+    # ran synchronously on the caller/gateway thread.
+    assert delivered == []
+    assert len(scheduled) == 1
+
+    callback, args = scheduled.pop()
+    callback(*args)
+    await asyncio.wait_for(drained.wait(), timeout=1.0)
+    assert delivered == [b"pcm"]
+
+
+def test_concurrent_dead_asr_audio_schedules_one_reconnect_per_owner():
+    scheduled = []
+    scheduled_lock = threading.Lock()
+
+    class _LoopProxy:
+        def is_closed(self):
+            return False
+
+        def call_soon_threadsafe(self, callback, *args):
+            with scheduled_lock:
+                scheduled.append((callback, args))
+
+    class _DeadASR:
+        is_connected = False
+
+    watcher = WatcherAgent(object())
+    watcher._loop = _LoopProxy()
+    asr = _DeadASR()
+    with watcher._asr_state_lock:
+        watcher._asr["turn"] = asr
+
+    barrier = threading.Barrier(9)
+    results = []
+
+    def _feed():
+        barrier.wait()
+        results.append(watcher.asr_audio("turn", b"pcm"))
+
+    threads = [threading.Thread(target=_feed) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=1.0)
+
+    assert results == [False] * 8
+    assert len(scheduled) == 1
+    assert watcher._asr_reconnecting == {"turn": asr}
 
 
 @pytest.mark.asyncio

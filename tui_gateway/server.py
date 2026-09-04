@@ -12258,6 +12258,7 @@ def _reconcile_stale_mm_jobs(history: list, agent=None,
                     state.get("hook_main_agent", False)),
                 "hook_instruction": str(
                     state.get("hook_instruction") or ""),
+                "pacing_mode": str(state.get("pacing_mode") or ""),
                 "ttl": str(state.get("ttl") or ""),
                 "ttl_sec": state.get("ttl_sec"),
                 "target_frames": state.get("target_frames"),
@@ -12459,6 +12460,7 @@ def _reconcile_stale_mm_jobs(history: list, agent=None,
                 "label": data.get("label", ""),
                 "hook_main_agent": bool(data.get("hook_main_agent", False)),
                 "hook_instruction": data.get("hook_instruction", ""),
+                "pacing_mode": data.get("pacing_mode", ""),
                 "ttl": data.get("ttl", ""),
                 "ttl_sec": data.get("ttl_sec"),
                 "target_frames": data.get("target_frames"),
@@ -12486,7 +12488,7 @@ def _reconcile_stale_mm_jobs(history: list, agent=None,
                 restored["task_instruction"] = task_text
             if "label" in data:
                 restored["label"] = str(data.get("label") or "")
-            for key in ("ttl", "ttl_sec", "target_frames"):
+            for key in ("pacing_mode", "ttl", "ttl_sec", "target_frames"):
                 if key in data:
                     restored[key] = data.get(key)
             if "hook_main_agent" in data:
@@ -15175,11 +15177,11 @@ def _(rid, params: dict) -> dict:
     except Exception:
         return _err(rid, 4017, "pcm_b64 not valid base64")
     try:
-        delivered = bool(engine.asr_audio(str(turn.get("key") or ""), pcm))
+        accepted = bool(engine.asr_audio(str(turn.get("key") or ""), pcm))
     except Exception as exc:
         logger.debug("asr_audio failed: %s", exc)
-        delivered = False
-    if not delivered:
+        accepted = False
+    if not accepted:
         if turn.get("mode") == "manual_turn":
             with turn["lock"]:
                 turn["audio_delivery_failed"] = True
