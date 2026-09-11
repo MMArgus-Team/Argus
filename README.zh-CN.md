@@ -21,7 +21,7 @@ Argus 是一个能"边看边聊"的多模态 AI 助手：主 Agent 处理用户�
 
 ## Demo 演示
 
-两段"边看边聊"的实况演示 —— 屏幕共享一段视频，向 Argus 提问，多模态 Agent 结合真实画面给出回答。**点击缩略图即可在 YouTube 上观看。**
+两段"边看边聊"的实况演示，以及一段基于 MM-DSH 的办公演示：屏幕共享、视觉问答与办公场景中的多模态交互。**点击缩略图即可在 YouTube 上观看。**
 
 <table>
 <tr>
@@ -38,9 +38,17 @@ Argus 是一个能"边看边聊"的多模态 AI 助手：主 Agent 处理用户�
 </a>
 </td>
 </tr>
+<tr>
+<td align="center" colspan="2">
+<a href="https://www.youtube.com/watch?v=35TsiaIgPRo">
+  <img src="assets/demo_mm_dsh_office.jpg" alt="MM-DSH 办公演示预览" width="720"><br/>
+  <b>💼 MM-DSH 办公演示</b>（点击播放）
+</a>
+</td>
+</tr>
 </table>
 
-<sub>视频托管在 YouTube。原始 4K 高清版本仍可在 <a href="https://github.com/MMArgus-Team/Argus/releases/tag/v0.1.0-demos">v0.1.0-demos Release 页面</a> 下载。</sub>
+<sub>视频托管在 YouTube。上方中英文“边看边聊”演示的原始 4K 高清版本仍可在 <a href="https://github.com/MMArgus-Team/Argus/releases/tag/v0.1.0-demos">v0.1.0-demos Release 页面</a> 下载。</sub>
 
 ## 主要能力
 

@@ -21,7 +21,7 @@ Argus is a multimodal AI assistant that can "watch and chat": the main Agent han
 
 ## Demo
 
-Live "watch-and-chat" walkthroughs of Argus — screen share a video, ask a question, get a grounded answer from the multimodal Agent. **Click a thumbnail to watch on YouTube.**
+Live "watch-and-chat" walkthroughs of Argus — screen share a video, ask a question, get a grounded answer from the multimodal Agent — plus an office workflow demo powered by MM-DSH. **Click a thumbnail to watch on YouTube.**
 
 <table>
 <tr>
@@ -38,9 +38,17 @@ Live "watch-and-chat" walkthroughs of Argus — screen share a video, ask a ques
 </a>
 </td>
 </tr>
+<tr>
+<td align="center" colspan="2">
+<a href="https://www.youtube.com/watch?v=35TsiaIgPRo">
+  <img src="assets/demo_mm_dsh_office.jpg" alt="MM-DSH office workflow demo preview" width="720"><br/>
+  <b>💼 MM-DSH office demo</b> (click to play)
+</a>
+</td>
+</tr>
 </table>
 
-<sub>Hosted on YouTube. Full 4K originals are also available on the <a href="https://github.com/MMArgus-Team/Argus/releases/tag/v0.1.0-demos">v0.1.0-demos Release</a>.</sub>
+<sub>Hosted on YouTube. Full 4K originals of the English and Chinese watch-and-chat demos are also available on the <a href="https://github.com/MMArgus-Team/Argus/releases/tag/v0.1.0-demos">v0.1.0-demos Release</a>.</sub>
 
 ## Highlights
 
