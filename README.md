@@ -15,6 +15,10 @@ Argus is a multimodal AI assistant that can "watch and chat": the main Agent han
 > by Nous Research. The original copyright and MIT license are preserved in
 > [LICENSE](LICENSE).
 
+## Related project: MM-DSH
+
+[MM-DSH](https://github.com/MMArgus-Team/MM-DSH) brings Argus to **DeepSeek Harness** with live screen and camera understanding, voice interaction, event monitoring, and offline video Q&A. See its [installation guide](https://github.com/MMArgus-Team/MM-DSH/blob/main/INSTALL.md) to get started.
+
 ## Demo
 
 Live "watch-and-chat" walkthroughs of Argus — screen share a video, ask a question, get a grounded answer from the multimodal Agent. **Click a thumbnail to watch on YouTube.**

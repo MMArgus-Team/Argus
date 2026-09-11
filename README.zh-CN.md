@@ -15,6 +15,10 @@ Argus 是一个能"边看边聊"的多模态 AI 助手：主 Agent 处理用户�
 > [Hermes Agent](https://github.com/NousResearch/hermes-agent) 修改而来。
 > 项目保留原始版权声明并继续使用 [MIT License](LICENSE)。
 
+## 关联项目：MM-DSH
+
+[MM-DSH](https://github.com/MMArgus-Team/MM-DSH) 将 Argus 接入 **DeepSeek Harness**，提供实时屏幕与摄像头理解、语音交互、事件监控和离线视频问答。使用方法见 [安装指南](https://github.com/MMArgus-Team/MM-DSH/blob/main/INSTALL.zh-CN.md)。
+
 ## Demo 演示
 
 两段"边看边聊"的实况演示 —— 屏幕共享一段视频，向 Argus 提问，多模态 Agent 结合真实画面给出回答。**点击缩略图即可在 YouTube 上观看。**
