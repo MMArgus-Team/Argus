@@ -122,6 +122,8 @@ Argus 是一个能"边看边聊"的多模态 AI 助手：主 Agent 处理用户�
 </tbody>
 </table>
 
+基准数据集: [StreamArena on Hugging Face](https://huggingface.co/datasets/hkuzxc/StreamArena).
+
 分数越高越好，Overall 分数以粗体展示。短横线或空白单元格表示未提供该项分数。
 
 ## 主要能力

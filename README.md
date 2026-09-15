@@ -122,6 +122,8 @@ Results on the StreamArena streaming benchmark, comparing offline models and str
 </tbody>
 </table>
 
+Benchmark dataset: [StreamArena on Hugging Face](https://huggingface.co/datasets/hkuzxc/StreamArena).
+
 Higher is better. Overall scores are highlighted in bold. A dash or an empty cell indicates a score that was not reported.
 
 ## Highlights
