@@ -54,18 +54,75 @@ Live "watch-and-chat" walkthroughs of Argus — screen share a video, ask a ques
 
 ## StreamArena Benchmark
 
-Results on the StreamArena streaming benchmark, comparing offline models and streaming harnesses across Tool, History, Real Time, and Monitor tasks.
+Results on the StreamArena streaming benchmark, comparing offline models and streaming harnesses across Tool-use, memory recall, Real Time perception, and proactive interaction tasks.
 
-| Setting | Model / Harness | Tool | History | Real Time | Monitor | Overall |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Offline | Qwen3.5-397B | 0.622 | 0.415 | 0.441 | — | — |
-| Offline | Kimi K2.6 | 0.609 | 0.438 | 0.479 | — | — |
-| Offline | Gemini 3.5 Flash | 0.708 | 0.514 | 0.513 | — | — |
-| Streaming Harness | StreamMind (Qwen3.5-397B) | 0.561 | 0.349 | 0.445 | 0.116 | 0.407 |
-| Streaming Harness | MMArgus (Qwen3.5-397B) | 0.571 | 0.408 | 0.449 | 0.194 | 0.443 |
-| Streaming Harness | MMArgus (Kimi K2.6 + Gemini 3.5 Flash) | 0.702 | 0.491 | 0.559 | 0.233 | **0.543** |
+<table>
+<thead>
+<tr>
+  <th align="left">setting</th>
+  <th align="left">model / harness</th>
+  <th align="left">Tool-use</th>
+  <th align="left">memory recall</th>
+  <th align="left">Real Time<br>perception</th>
+  <th align="left">proactive<br>interaction</th>
+  <th align="left">overall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td rowspan="3" valign="top">Offline</td>
+  <td>Qwen3.5-397B</td>
+  <td align="left">0.622</td>
+  <td align="left">0.415</td>
+  <td align="left">0.441</td>
+  <td align="left">-</td>
+  <td align="left"></td>
+</tr>
+<tr>
+  <td>Kimi K2.6</td>
+  <td align="left">0.609</td>
+  <td align="left">0.438</td>
+  <td align="left">0.479</td>
+  <td align="left">-</td>
+  <td align="left"></td>
+</tr>
+<tr>
+  <td>Gemini 3.5 Flash</td>
+  <td align="left">0.708</td>
+  <td align="left">0.514</td>
+  <td align="left">0.513</td>
+  <td align="left">-</td>
+  <td align="left"></td>
+</tr>
+<tr>
+  <td rowspan="3" valign="top">Streaming<br>Harness</td>
+  <td>StreamMind (Qwen3.5-397B)</td>
+  <td align="left">0.561</td>
+  <td align="left">0.349</td>
+  <td align="left">0.445</td>
+  <td align="left">0.116</td>
+  <td align="left"><b>0.407</b></td>
+</tr>
+<tr>
+  <td>MMArgus (Qwen3.5-397B)</td>
+  <td align="left">0.571</td>
+  <td align="left">0.408</td>
+  <td align="left">0.449</td>
+  <td align="left">0.194</td>
+  <td align="left"><b>0.443</b></td>
+</tr>
+<tr>
+  <td>MMArgus (Kimi K2.6 + Gemini 3.5 Flash)</td>
+  <td align="left">0.702</td>
+  <td align="left">0.491</td>
+  <td align="left">0.559</td>
+  <td align="left">0.233</td>
+  <td align="left"><b>0.543</b></td>
+</tr>
+</tbody>
+</table>
 
-Higher is better. **Bold** marks the highest reported Overall score among the listed configurations. — indicates a score that was not reported.
+Higher is better. Overall scores are highlighted in bold. A dash or an empty cell indicates a score that was not reported.
 
 ## Highlights
 
