@@ -52,6 +52,21 @@ Live "watch-and-chat" walkthroughs of Argus — screen share a video, ask a ques
 
 <sub>Hosted on YouTube. Full 4K originals of the English and Chinese watch-and-chat demos are also available on the <a href="https://github.com/MMArgus-Team/Argus/releases/tag/v0.1.0-demos">v0.1.0-demos Release</a>.</sub>
 
+## StreamArena Benchmark
+
+Results on the StreamArena streaming benchmark, comparing offline models and streaming harnesses across Tool, History, Real Time, and Monitor tasks.
+
+| Setting | Model / Harness | Tool | History | Real Time | Monitor | Overall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Offline | Qwen3.5-397B | 0.622 | 0.415 | 0.441 | — | — |
+| Offline | Kimi K2.6 | 0.609 | 0.438 | 0.479 | — | — |
+| Offline | Gemini 3.5 Flash | 0.708 | 0.514 | 0.513 | — | — |
+| Streaming Harness | StreamMind (Qwen3.5-397B) | 0.561 | 0.349 | 0.445 | 0.116 | 0.407 |
+| Streaming Harness | MMArgus (Qwen3.5-397B) | 0.571 | 0.408 | 0.449 | 0.194 | 0.443 |
+| Streaming Harness | MMArgus (Kimi K2.6 + Gemini 3.5 Flash) | 0.702 | 0.491 | 0.559 | 0.233 | **0.543** |
+
+Higher is better. **Bold** marks the highest reported Overall score among the listed configurations. — indicates a score that was not reported.
+
 ## Highlights
 
 - Current and historical visual question answering through `query_multimodal`.

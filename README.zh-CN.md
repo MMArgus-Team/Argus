@@ -52,6 +52,21 @@ Argus 是一个能"边看边聊"的多模态 AI 助手：主 Agent 处理用户�
 
 <sub>视频托管在 YouTube。上方中英文“边看边聊”演示的原始 4K 高清版本仍可在 <a href="https://github.com/MMArgus-Team/Argus/releases/tag/v0.1.0-demos">v0.1.0-demos Release 页面</a> 下载。</sub>
 
+## StreamArena Benchmark
+
+在 StreamArena 流式基准上的评测结果，对比离线模型与 Streaming Harness 在 Tool、History、Real Time 和 Monitor 任务上的表现。
+
+| 设置 | 模型 / Harness | Tool | History | Real Time | Monitor | Overall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Offline | Qwen3.5-397B | 0.622 | 0.415 | 0.441 | — | — |
+| Offline | Kimi K2.6 | 0.609 | 0.438 | 0.479 | — | — |
+| Offline | Gemini 3.5 Flash | 0.708 | 0.514 | 0.513 | — | — |
+| Streaming Harness | StreamMind (Qwen3.5-397B) | 0.561 | 0.349 | 0.445 | 0.116 | 0.407 |
+| Streaming Harness | MMArgus (Qwen3.5-397B) | 0.571 | 0.408 | 0.449 | 0.194 | 0.443 |
+| Streaming Harness | MMArgus (Kimi K2.6 + Gemini 3.5 Flash) | 0.702 | 0.491 | 0.559 | 0.233 | **0.543** |
+
+分数越高越好。**粗体**表示所列配置中已报告的最高 Overall 分数。— 表示未提供该项分数。
+
 ## 主要能力
 
 - 使用 `query_multimodal` 回答当前画面和历史画面问题。
